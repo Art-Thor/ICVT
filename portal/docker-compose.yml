@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  portal:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # essential variables
+      - AWS_REGION=${AWS_REGION:-ap-southeast-2}
+      - BRONZE_BUCKET=${BRONZE_BUCKET:-bronze-bucket-icvt}
+      - SILVER_BUCKET=${SILVER_BUCKET:-silver-bucket-icvt}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - JWT_SECRET=${JWT_SECRET:-change-me-secret}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
+      - ADMIN_RESET=${ADMIN_RESET:-0}
+      # SQLite stored outside container for persistence
+      - DB_URL=${DB_URL:-sqlite:////data/portal.db}
+      - PORT=8000
+    volumes:
+      - ./data:/data
+      - ~/.aws:/root/.aws
+    restart: unless-stopped

@@ -1,0 +1,1447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Textract Portal</title>
+  <style>
+    :root[data-theme="dark"] {
+      --bg: #0c111b;
+      --card: #111827;
+      --panel: #0f172a;
+      --accent: #4ade80;
+      --accent2: #60a5fa;
+      --border: #1f2937;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --danger: #ef4444;
+      --warning: #fbbf24;
+      --header-bg: rgba(17, 24, 39, 0.9);
+      --table-th: #0b1221;
+      --table-hover: rgba(96,165,250,0.07);
+    }
+    :root[data-theme="light"] {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --panel: #f1f5f9;
+      --accent: #22c55e;
+      --accent2: #3b82f6;
+      --border: #d4d7dd;
+      --text: #0f172a;
+      --muted: #475569;
+      --danger: #dc2626;
+      --warning: #f59e0b;
+      --header-bg: #ffffff;
+      --table-th: #e2e8f0;
+      --table-hover: rgba(59,130,246,0.08);
+    }
+    * { box-sizing: border-box; }
+    body { font-family: "Inter", "Segoe UI", Arial, sans-serif; margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+    header { background: var(--header-bg); backdrop-filter: blur(6px); padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.12); }
+    h1, h2, h3 { margin: 0 0 12px 0; font-weight: 700; }
+    label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.02em; }
+    input, select { width: 100%; padding: 11px 12px; margin-bottom: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+    input:focus, select:focus { outline: none; border-color: var(--accent2); box-shadow: 0 0 0 2px rgba(96,165,250,0.25); }
+    button { background: var(--accent); color: #0f172a; padding: 10px 14px; border: none; border-radius: 10px; cursor: pointer; font-weight: 700; box-shadow: 0 10px 25px rgba(74,222,128,0.25); transition: transform 0.1s ease, box-shadow 0.1s ease; }
+    button:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(74,222,128,0.35); }
+    button.secondary { background: var(--accent2); color: #0f172a; box-shadow: 0 10px 25px rgba(96,165,250,0.25); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .status { padding: 10px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--border); margin-top: 8px; }
+    .info-banner { padding: 10px 12px; border-radius: 10px; background: var(--panel); border: 1px dashed var(--border); margin: 8px 0 18px 0; font-weight: 700; display: inline-block; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; border: 1px solid var(--border); }
+    th, td { padding: 12px; border-bottom: 1px solid var(--border); text-align: left; }
+    th { background: var(--table-th); text-transform: uppercase; letter-spacing: 0.02em; font-size: 12px; }
+    tr:hover { background: var(--table-hover); cursor: pointer; }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    .pill { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; }
+    .pill.green { background: var(--accent); color: #0f172a; }
+    .pill.amber { background: var(--warning); color: #0f172a; }
+    .pill.red { background: var(--danger); color: #fff; }
+    pre { background: var(--panel); color: #cbd5e1; padding: 12px; border-radius: 10px; border: 1px solid var(--border); overflow: auto; max-height: 280px; }
+    a { color: var(--accent); }
+    .hidden { display: none; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .inline { display: inline-block; margin-right: 8px; }
+    .collapsible { border-radius: 14px; }
+    .collapsible-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    .collapsible-body.collapsed { display: none; }
+    .doc-layout { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+    .layout-row-lr { flex-direction: row; }
+    .layout-row-rl { flex-direction: row-reverse; }
+    .layout-col-tb { flex-direction: column; flex-wrap: nowrap; }
+    .layout-col-bt { flex-direction: column-reverse; flex-wrap: nowrap; }
+    .layout-col-tb .doc-pdf,
+    .layout-col-bt .doc-pdf,
+    .layout-col-tb .doc-fields,
+    .layout-col-bt .doc-fields { flex: 1 1 auto; width: 100%; min-width: 0; }
+    .doc-pdf { flex: 1 1 480px; min-width: 320px; max-height: 80vh; overflow: auto; position: relative; }
+    .doc-fields { flex: 1 1 320px; min-width: 280px; max-height: 80vh; overflow: auto; }
+    .zoom-controls { display: inline-flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+    .legend { display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px; color:var(--muted); margin:10px 0; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .legend .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
+    .legend .dot.green { background:#22c55e; }
+    .legend .dot.amber { background:#fbbf24; }
+    .legend .dot.red { background:#ef4444; }
+    .compact-select { max-width: 220px; min-width: 180px; width: 100%; }
+  </style>
+  <script src="/static/pdf.min.js"></script>
+</head>
+<body>
+  <header>
+    <div id="navButtons" class="hidden">
+      <button class="secondary" data-view="jobs">Jobs</button>
+      <button class="secondary" data-view="admin">Admin</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <button id="themeToggle" class="secondary">Toggle theme</button>
+      <div id="userInfo"></div>
+    </div>
+  </header>
+
+  <main>
+    <section id="view-login" class="card">
+      <h2>Login</h2>
+      <div class="grid">
+        <div>
+          <label>Email</label>
+          <input id="loginEmail" type="email" placeholder="admin@example.com">
+        </div>
+        <div>
+          <label>Password</label>
+          <input id="loginPass" type="password" placeholder="Password">
+        </div>
+      </div>
+      <button id="loginBtn">Sign in</button>
+      <div class="status" id="loginStatus">Enter your credentials</div>
+    </section>
+
+    <section id="view-jobs" class="hidden">
+      <div class="card collapsible" data-collapsible="jobsList">
+        <div class="collapsible-head">
+          <h2>Job list</h2>
+          <button class="secondary" data-toggle="jobsList">Collapse</button>
+        </div>
+        <div class="collapsible-body" id="jobsBody">
+          <div class="status" id="jobsStatus">Loading...</div>
+          <table id="jobsTable">
+            <thead>
+              <tr>
+                <th>Customer</th><th>Job Name</th><th>Job Type</th><th>Documents to Review</th><th>Priority</th><th>Folder prefix</th><th>Active verifiers</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="status" id="selectedJob" class="hidden"></div>
+        </div>
+      </div>
+
+      <div id="jobContext" class="info-banner hidden"></div>
+
+      <div class="card collapsible hidden" id="uploadCard" style="margin-top:16px;" data-collapsible="upload">
+        <div class="collapsible-head">
+          <h3>Upload to selected job</h3>
+          <button class="secondary" data-toggle="upload">Collapse</button>
+        </div>
+        <div class="collapsible-body" id="uploadBody">
+          <div class="grid">
+            <div>
+              <label>Job prefix</label>
+              <input id="jobFolder" type="text" readonly>
+            </div>
+            <div>
+              <label>File (PDF/TIFF/PNG/JPG)</label>
+              <input id="fileInput" type="file" accept=".pdf,.tiff,.tif,.png,.jpg,.jpeg" multiple>
+            </div>
+          </div>
+          <button id="uploadBtn">Upload and run Textract</button>
+          <div class="status" id="statusBox">Select job and file</div>
+        </div>
+      </div>
+
+      <!-- documents container -->
+      <div id="docsContainer"></div>
+
+      <div class="card hidden" id="textractCard">
+        <h3>Textract Result</h3>
+        <div id="textractStatus"></div>
+        <div id="textractData"></div>
+        <div id="exportLink"></div>
+        <details>
+          <summary>Raw JSON</summary>
+          <pre id="rawJson"></pre>
+        </details>
+      </div>
+    </section>
+
+    <section id="view-admin" class="hidden">
+      <div class="card">
+        <h2>Users</h2>
+        <div class="grid">
+          <div><label>Email</label><input id="userEmail" type="email" placeholder="user@example.com"></div>
+          <div><label>Password</label><input id="userPass" type="password" placeholder="Password"></div>
+          <div>
+            <label>Role</label>
+            <select id="userRole">
+              <option value="verifier">verifier</option>
+              <option value="viewer">viewer</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        </div>
+        <button id="createUserBtn">Create user</button>
+        <div class="status" id="usersStatus"></div>
+        <table id="usersTable">
+          <thead><tr><th>Email</th><th>Role</th><th>Created</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Reviewer access (job folders)</h2>
+        <div class="grid">
+          <div>
+            <label>User</label>
+            <select id="accessUserSelect"></select>
+          </div>
+          <div>
+            <label>Folders (jobs)</label>
+            <div id="accessFoldersWrap" style="display:flex; flex-wrap:wrap; gap:8px; max-height:160px; overflow:auto; border:1px solid var(--border); padding:8px; border-radius:10px; background:var(--panel);"></div>
+          </div>
+        </div>
+        <button id="createAccessBtn">Save access</button>
+        <div class="status" id="accessStatus"></div>
+        <table id="accessTable">
+          <thead><tr><th>ID</th><th>User ID</th><th>Folder</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Access matrix</h2>
+        <button class="secondary" id="refreshAccessSummaryBtn">Refresh</button>
+        <div class="status" id="accessSummaryStatus">Not loaded</div>
+        <div class="table-wrap">
+          <table id="accessSummaryTable">
+            <thead><tr><th>User</th><th>Role</th><th>Folders</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Job types</h2>
+        <div class="grid">
+          <div><label>Customer</label><input id="jobCustomer" type="text"></div>
+          <div><label>Job Name</label><input id="jobName" type="text"></div>
+          <div><label>Job Type</label><input id="jobType" type="text"></div>
+          <div><label>Priority</label><input id="jobPriority" type="number" value="0"></div>
+          <div><label>Folder prefix</label><input id="jobFolderPrefix" type="text" placeholder="e.g. NZME_EXP_AUD"></div>
+          <div><label>Active verifiers</label><input id="jobVerifiers" type="number" value="0"></div>
+        </div>
+        <button id="createJobBtn">Create job</button>
+        <div class="status" id="jobsAdminStatus"></div>
+      </div>
+
+      <div class="card">
+        <h2>Reference data (CSV)</h2>
+        <div class="grid">
+          <div>
+            <label>Upload CSV</label>
+            <input id="refUploadInput" type="file" accept=".csv">
+          </div>
+        </div>
+        <button id="refUploadBtn">Upload</button>
+        <button class="secondary" id="refReloadBtn">Reload from disk</button>
+        <div class="status" id="refStatus">Not loaded</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      token: localStorage.getItem('token') || '',
+      role: localStorage.getItem('role') || '',
+      email: localStorage.getItem('email') || '',
+      jobs: [],
+      users: [],
+      current: { folder: '', filename: '', key: '' },
+      polling: null,
+      selectedJob: null,
+      documents: [],
+      docCursor: null,
+      selectedDoc: null,
+      layout: localStorage.getItem('docLayout') || 'row-lr',
+      groupMode: localStorage.getItem('docGroupMode') || 'none',
+      groupDate: localStorage.getItem('docGroupDate') || '',
+    };
+
+    const views = ['login','jobs','admin'];
+    const viewElems = Object.fromEntries(views.map(v => [v, document.getElementById('view-'+v)]));
+    const navButtons = document.querySelectorAll('header button[data-view]');
+    const navContainer = document.getElementById('navButtons');
+    const adminBtn = document.querySelector('header button[data-view="admin"]');
+    const userInfo = document.getElementById('userInfo');
+
+    const loginEmail = document.getElementById('loginEmail');
+    const loginPass = document.getElementById('loginPass');
+    const loginBtn = document.getElementById('loginBtn');
+    const loginStatus = document.getElementById('loginStatus');
+
+    const jobsStatus = document.getElementById('jobsStatus');
+    const jobsTableBody = document.querySelector('#jobsTable tbody');
+    const selectedJobBox = document.getElementById('selectedJob');
+    const jobContext = document.getElementById('jobContext');
+    const uploadCard = document.getElementById('uploadCard');
+    const uploadBody = document.getElementById('uploadBody');
+    const fileInput = document.getElementById('fileInput');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const statusBox = document.getElementById('statusBox');
+    const textractCard = document.getElementById('textractCard');
+    const textractStatus = document.getElementById('textractStatus');
+    const textractData = document.getElementById('textractData');
+    const rawJson = document.getElementById('rawJson');
+    const exportLink = document.getElementById('exportLink');
+    const jobFolderInput = document.getElementById('jobFolder');
+    const docsJobLabel = document.getElementById('docsJobLabel');
+    const refUploadInput = document.getElementById('refUploadInput');
+    const refUploadBtn = document.getElementById('refUploadBtn');
+    const refReloadBtn = document.getElementById('refReloadBtn');
+    const refStatus = document.getElementById('refStatus');
+    const docsCard = document.createElement('div');
+    docsCard.className = 'card hidden collapsible';
+    docsCard.dataset.collapsible = 'docs';
+    docsCard.innerHTML = `
+      <div class="collapsible-head">
+        <h3>Documents in job <span id="docsJobLabel" style="font-weight:600;color:var(--muted);font-size:14px;"></span></h3>
+        <button class="secondary" data-toggle="docs">Collapse</button>
+      </div>
+      <div class="collapsible-body" id="docsBody">
+      <div class="row">
+        <div>
+          <label>Status filter</label>
+          <select id="docStatusFilter" class="compact-select">
+            <option value="To Review" selected>To Review</option>
+            <option value="">All</option>
+            <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+        </div>
+        <div>
+          <label>Group by</label>
+          <select id="docGroupBy" class="compact-select">
+            <option value="none">None</option>
+            <option value="day">Day</option>
+            <option value="month">Month</option>
+          </select>
+        </div>
+        <div id="groupPeriodControls" class="hidden" style="display:flex; gap:6px; align-items:flex-end;">
+          <div>
+            <label>Period start</label>
+            <input type="date" id="groupDateInput" style="min-width:160px;">
+          </div>
+          <div class="row" style="gap:6px;">
+            <button class="secondary" id="groupPrev">←</button>
+            <button class="secondary" id="groupNext">→</button>
+          </div>
+        </div>
+        <button id="refreshDocsBtn" class="secondary">Refresh</button>
+        <button id="exportApprovedBtn" class="secondary">Export Approved</button>
+        <button id="exportRejectedBtn" class="secondary">Export Rejected</button>
+      </div>
+      <div class="table-wrap">
+        <table id="docsTable">
+          <thead><tr>
+            <th>Status</th><th>Name</th><th>Created</th><th>Invoice #</th><th>Invoice Date</th><th>Total</th><th>Supplier</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="status" id="docsStatus">No data</div>
+      </div>
+    `;
+    const docsContainer = document.getElementById('docsContainer');
+    docsContainer.appendChild(docsCard);
+
+    const docDetailCard = document.createElement('div');
+    docDetailCard.className = 'card hidden';
+    docDetailCard.innerHTML = `
+      <h3>Document</h3>
+      <div id="docInfo"></div>
+      <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap;">
+        <button class="secondary" data-layout="row-lr">Doc left</button>
+        <button class="secondary" data-layout="row-rl">Doc right</button>
+        <button class="secondary" data-layout="col-tb">Doc top</button>
+        <button class="secondary" data-layout="col-bt">Doc bottom</button>
+        <div class="zoom-controls">
+          <button id="zoomIn" class="secondary">+</button>
+          <button id="zoomOut" class="secondary">-</button>
+        </div>
+      </div>
+      <div id="docLayoutWrap" class="doc-layout">
+        <div id="pdfContainer" class="doc-pdf" style="position:relative; border:1px solid var(--border); border-radius:8px; overflow:auto; min-height:400px; background:#0b1623;">
+          <canvas id="pdfCanvas" style="width:100%; display:block;"></canvas>
+          <div id="pdfOverlay" style="position:absolute; inset:0; pointer-events:none;"></div>
+        </div>
+        <div class="doc-fields">
+      <div class="row" style="align-items:flex-end;">
+        <div>
+          <label>Customer ID lookup</label>
+          <input id="customerLookupInput" class="compact-select" placeholder="Enter customer ID">
+        </div>
+        <button id="customerLookupBtn">Lookup</button>
+        <div id="customerLookupStatus" class="status" style="min-width:220px;">Lookup not started</div>
+      </div>
+          <div class="legend">
+            <strong>Confidence legend:</strong>
+            <span><span class="dot green"></span>80%+</span>
+            <span><span class="dot amber"></span>70–79%</span>
+            <span><span class="dot red"></span><70%</span>
+          </div>
+          <div class="grid" id="docFields"></div>
+        </div>
+      </div>
+      <div class="row" style="align-items:flex-end;">
+        <div>
+          <label style="width:120px;">Status</label>
+          <select id="docStatusSelect" class="compact-select">
+            <option value="To Review">To Review</option>
+            <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+        </div>
+        <div id="docReasonWrap" class="hidden">
+          <label>Reason (for Rejected)</label>
+          <select id="docReasonSelect" class="compact-select">
+            <option value="">Select reason</option>
+            <option value="Not valid">Not valid</option>
+            <option value="Illegible">Illegible</option>
+            <option value="Missing date/number">Missing date/number</option>
+            <option value="Unknown supplier">Unknown supplier</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <button id="docSaveBtn">Save</button>
+      </div>
+    `;
+    docsContainer.appendChild(docDetailCard);
+
+    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
+    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
+    const customerLookupInput = document.getElementById('customerLookupInput');
+    const customerLookupBtn = document.getElementById('customerLookupBtn');
+    const customerLookupStatus = document.getElementById('customerLookupStatus');
+
+    const createUserBtn = document.getElementById('createUserBtn');
+    const usersStatus = document.getElementById('usersStatus');
+    const usersTableBody = document.querySelector('#usersTable tbody');
+    const userEmail = document.getElementById('userEmail');
+    const userPass = document.getElementById('userPass');
+    const userRole = document.getElementById('userRole');
+    const createAccessBtn = document.getElementById('createAccessBtn');
+    const accessStatus = document.getElementById('accessStatus');
+    const accessTableBody = document.querySelector('#accessTable tbody');
+    const accessUserSelect = document.getElementById('accessUserSelect');
+    const accessFoldersWrap = document.getElementById('accessFoldersWrap');
+
+    const createJobBtn = document.getElementById('createJobBtn');
+    const jobsAdminStatus = document.getElementById('jobsAdminStatus');
+    const jobCustomer = document.getElementById('jobCustomer');
+    const jobName = document.getElementById('jobName');
+    const jobType = document.getElementById('jobType');
+    const jobPriority = document.getElementById('jobPriority');
+    const jobFolderPrefix = document.getElementById('jobFolderPrefix');
+    const jobVerifiers = document.getElementById('jobVerifiers');
+    const pdfRenderState = { url: null, norm: [], scale: 1, focusBox: null, pageViewport: null, highlightBox: null };
+    const themeToggle = document.getElementById('themeToggle');
+    const layoutButtons = document.querySelectorAll('[data-layout]');
+
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdf.worker.min.js";
+    }
+
+    function showView(name) {
+      views.forEach(v => viewElems[v].classList.add('hidden'));
+      viewElems[name].classList.remove('hidden');
+    }
+
+    function setUserInfo() {
+      if (state.token) {
+        userInfo.innerHTML = `<span class="pill green">${state.role}</span> ${state.email} <button class="secondary" onclick="logout()">Logout</button>`;
+        navContainer.classList.remove('hidden');
+        if (adminBtn) adminBtn.style.display = state.role === 'admin' ? '' : 'none';
+        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn')];
+        exportBtns.forEach(btn => { if (btn) btn.style.display = state.role === 'admin' ? '' : 'none'; });
+      } else {
+        userInfo.textContent = 'Not authenticated';
+        navContainer.classList.add('hidden');
+        if (adminBtn) adminBtn.style.display = 'none';
+        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn')];
+        exportBtns.forEach(btn => { if (btn) btn.style.display = 'none'; });
+      }
+    }
+    function setTheme(theme) {
+      const t = theme === 'light' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+      localStorage.setItem('theme', t);
+      if (themeToggle) {
+        themeToggle.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
+      }
+    }
+    window.logout = function() {
+      state.token = ''; state.role=''; state.email=''; state.selectedJob = null;
+      if (jobContext) { jobContext.classList.add('hidden'); jobContext.textContent = ''; }
+      if (docsJobLabel) { docsJobLabel.textContent = ''; }
+      localStorage.removeItem('token'); localStorage.removeItem('role'); localStorage.removeItem('email');
+      setUserInfo(); showView('login');
+    }
+
+    navButtons.forEach(btn => btn.addEventListener('click', () => {
+      const v = btn.dataset.view;
+      if (v === 'admin' && state.role !== 'admin') return alert('Admin only');
+      showView(v);
+      if (v === 'jobs') refreshJobs();
+      if (v === 'admin') { refreshUsers(); refreshAccess(); refreshJobs(); refreshAccessSummary(); }
+    }));
+    if (themeToggle) {
+      themeToggle.addEventListener('click', () => {
+        const current = localStorage.getItem('theme') || 'dark';
+        setTheme(current === 'dark' ? 'light' : 'dark');
+      });
+    }
+
+    function colorPill(conf) {
+      if (conf >= 0.8) return 'green';
+      if (conf >= 0.7) return 'amber';
+      return 'red';
+    }
+
+    function confidenceColor(conf) {
+      if (conf >= 0.8) return '#22c55e';
+      if (conf >= 0.7) return '#fbbf24';
+      return '#ef4444';
+    }
+
+    function normalizeConfidence(val) {
+      const num = parseFloat(val);
+      return Number.isFinite(num) ? num : 0;
+    }
+
+    function isValidBox(box) {
+      if (!box) return false;
+      const left = Number(box.Left);
+      const top = Number(box.Top);
+      const width = Number(box.Width);
+      const height = Number(box.Height);
+      if (![left, top, width, height].every(v => Number.isFinite(v))) return false;
+      if (width <= 0 || height <= 0) return false;
+      if (left < 0 || top < 0) return false;
+      if (left > 1.05 || top > 1.05) return false;
+      if (left + width < 0 || top + height < 0) return false;
+      if (left + width > 1.1 || top + height > 1.1) return false;
+      return true;
+    }
+
+    async function api(path, options = {}) {
+      const headers = options.headers || {};
+      headers['Content-Type'] = options.body ? 'application/json' : headers['Content-Type'];
+      if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+      const resp = await fetch(path, { ...options, headers });
+      if (!resp.ok) throw new Error(await resp.text());
+      return resp.json();
+    }
+
+    loginBtn.addEventListener('click', async () => {
+      try {
+        loginBtn.disabled = true;
+        loginStatus.textContent = 'Signing in...';
+        const data = await api('/auth/login', { method: 'POST', body: JSON.stringify({ email: loginEmail.value, password: loginPass.value }) });
+        state.token = data.token; state.role = data.role; state.email = data.email;
+        localStorage.setItem('token', state.token);
+        localStorage.setItem('role', state.role);
+        localStorage.setItem('email', state.email);
+        loginStatus.textContent = 'Success';
+        setUserInfo();
+        showView('jobs');
+        refreshJobs();
+      } catch (e) {
+        loginStatus.textContent = 'Error: ' + e.message;
+      } finally {
+        loginBtn.disabled = false;
+      }
+    });
+
+    async function refreshJobs() {
+      if (!state.token) { jobsStatus.textContent = 'Login required'; return; }
+      jobsStatus.textContent = 'Loading...';
+      try {
+        const jobs = await api('/jobs');
+        state.jobs = jobs;
+        jobsTableBody.innerHTML = '';
+        for (const j of jobs) {
+          const tr = document.createElement('tr');
+          const verifiers = Array.isArray(j.active_verifiers) ? j.active_verifiers.join(', ') : (j.active_verifiers ?? '');
+          tr.innerHTML = `<td>${j.customer}</td><td>${j.name}</td><td>${j.job_type}</td><td>${j.documents_to_review ?? '-'}</td><td>${j.priority}</td><td>${j.folder_prefix}</td><td>${verifiers || '-'}</td>`;
+          tr.addEventListener('click', () => selectJob(j));
+          jobsTableBody.appendChild(tr);
+        }
+        jobsStatus.textContent = `${jobs.length} results`;
+      } catch (e) {
+        jobsStatus.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    function selectJob(job) {
+      state.selectedJob = job;
+      selectedJobBox.textContent = `Selected: ${job.customer} / ${job.name} (${job.folder_prefix})`;
+      if (jobContext) {
+        jobContext.textContent = `${job.customer} / ${job.name} (${job.folder_prefix})`;
+        jobContext.classList.remove('hidden');
+      }
+      if (docsJobLabel) {
+        docsJobLabel.textContent = ` — ${job.customer} / ${job.name} (${job.folder_prefix})`;
+      }
+      jobFolderInput.value = job.folder_prefix;
+      uploadCard.classList.remove('hidden');
+      docsCard.classList.remove('hidden');
+      docDetailCard.classList.add('hidden');
+      setCollapsed('jobsList', true);
+      setCollapsed('upload', false);
+      setCollapsed('docs', false);
+      refreshDocs(true);
+    }
+
+    async function refreshDocs(reset=false) {
+      if (!state.selectedJob) return;
+      if (reset) { state.docCursor = null; state.documents = []; }
+      const filter = document.getElementById('docStatusFilter').value;
+      docsStatus.textContent = 'Loading...';
+      try {
+        const qs = new URLSearchParams({ job: state.selectedJob.folder_prefix, page_size: 50 });
+        if (filter) qs.append('status', filter);
+        if (state.docCursor) qs.append('cursor', state.docCursor);
+        const data = await api('/api/documents?' + qs.toString());
+        state.documents = reset ? data.items : state.documents.concat(data.items || []);
+        state.docCursor = data.next_cursor || null;
+        renderDocs();
+        docsStatus.textContent = `${state.documents.length} records${data.truncated ? ' (more available)' : ''}`;
+      } catch (e) {
+        docsStatus.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    function findNextToReview(currentKey) {
+      const docs = state.documents || [];
+      const start = docs.findIndex(d => d.key === currentKey);
+      for (let i = (start >= 0 ? start + 1 : 0); i < docs.length; i++) {
+        if ((docs[i].status || '') === 'To Review') return docs[i];
+      }
+      for (const d of docs) {
+        if ((d.status || '') === 'To Review') return d;
+      }
+      return null;
+    }
+
+    function renderDocs() {
+      const tbody = docsCard.querySelector('#docsTable tbody');
+      tbody.innerHTML = '';
+      const groupMode = state.groupMode || 'none';
+      const statusFilter = document.getElementById('docStatusFilter').value || '';
+      const statusFilterLower = statusFilter.toLowerCase();
+      // optional period filter when grouping
+      const periodStart = state.groupDate;
+      const parseDate = (val) => {
+        if (!val) return null;
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? null : d;
+      };
+      const periodDate = parseDate(periodStart);
+      const sameDay = (d) => {
+        if (!periodDate || !d) return true;
+        return d.getUTCFullYear() === periodDate.getUTCFullYear() &&
+               d.getUTCMonth() === periodDate.getUTCMonth() &&
+               d.getUTCDate() === periodDate.getUTCDate();
+      };
+      const sameMonth = (d) => {
+        if (!periodDate || !d) return true;
+        return d.getUTCFullYear() === periodDate.getUTCFullYear() &&
+               d.getUTCMonth() === periodDate.getUTCMonth();
+      };
+
+      const filteredDocs = state.documents.filter(d => {
+        if (statusFilter) {
+          const s = (d.status || '').toLowerCase();
+          if (statusFilterLower === 'to review') {
+            if (!(s === '' || s === 'to review')) return false;
+          } else if (s !== statusFilterLower) {
+            return false;
+          }
+        }
+        if (groupMode === 'none') return true;
+        const dt = parseDate(d.created_at);
+        if (!dt) return false;
+        if (groupMode === 'day') return sameDay(dt);
+        if (groupMode === 'month') return sameMonth(dt);
+        return true;
+      });
+
+      if (groupMode === 'none') {
+        for (const d of filteredDocs) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${d.status || ''}</td><td>${d.name || ''}</td><td>${d.created_at || ''}</td><td>${d.invoice_number || ''}</td><td>${d.invoice_date || ''}</td><td>${d.total_amount || ''}</td><td>${d.supplier || ''}</td>`;
+          tr.addEventListener('click', () => openDoc(d));
+          tbody.appendChild(tr);
+        }
+      } else {
+        const groups = {};
+        const fmtDay = (dstr) => (dstr || '').slice(0, 10) || 'Unknown';
+        const fmtMonth = (dstr) => {
+          if (!dstr) return 'Unknown';
+          const d = parseDate(dstr);
+          if (!d) return 'Unknown';
+          return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2,'0')}`;
+        };
+        const labelFn = groupMode === 'day' ? fmtDay : fmtMonth;
+        for (const d of filteredDocs) {
+          const label = labelFn(d.created_at);
+          groups[label] = groups[label] || [];
+          groups[label].push(d);
+        }
+        Object.entries(groups).forEach(([label, rows]) => {
+          const hr = document.createElement('tr');
+          const hd = document.createElement('td');
+          hd.colSpan = 7;
+          hd.style.fontWeight = '700';
+          hd.textContent = label || 'Unknown';
+          hr.appendChild(hd);
+          tbody.appendChild(hr);
+          rows.forEach(d => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${d.status || ''}</td><td>${d.name || ''}</td><td>${d.created_at || ''}</td><td>${d.invoice_number || ''}</td><td>${d.invoice_date || ''}</td><td>${d.total_amount || ''}</td><td>${d.supplier || ''}</td>`;
+            tr.addEventListener('click', () => openDoc(d));
+            tbody.appendChild(tr);
+          });
+        });
+      }
+      if (state.docCursor) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 7;
+        const btn = document.createElement('button');
+        btn.textContent = 'Load more';
+        btn.addEventListener('click', () => refreshDocs(false));
+        td.appendChild(btn);
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function openDoc(doc) {
+      try {
+        const data = await api('/api/documents/detail?key=' + encodeURIComponent(doc.key));
+        state.selectedDoc = { ...doc, payload: data.payload, pdf_url: data.pdf_url, source_bucket: data.source_bucket, source_file: data.source_key };
+        renderDocDetail();
+        // Collapse documents list when a document is open to focus on the detail view.
+        setCollapsed('docs', true);
+      } catch (e) {
+        alert('Failed to open document: ' + e.message);
+      }
+    }
+
+    function renderAccessUserOptions(users) {
+      if (!accessUserSelect) return;
+      accessUserSelect.innerHTML = '<option value="">Select user</option>';
+      users.forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u.id;
+        opt.textContent = `${u.email} (${u.role})`;
+        accessUserSelect.appendChild(opt);
+      });
+      accessUserSelect.addEventListener('change', renderAccessFolders);
+    }
+
+    function renderAccessFolders() {
+      if (!accessFoldersWrap) return;
+      const userId = parseInt(accessUserSelect.value || '0', 10);
+      accessFoldersWrap.innerHTML = '';
+      const allowed = (state.userAccess || []).filter(a => a.user_id === userId).map(a => a.folder_prefix);
+      const folders = state.jobs.map(j => j.folder_prefix);
+      const unique = Array.from(new Set(folders));
+      unique.forEach(folder => {
+        const id = `folder-${folder}`;
+        const wrap = document.createElement('label');
+        wrap.style.display = 'flex';
+        wrap.style.alignItems = 'center';
+        wrap.style.gap = '6px';
+        wrap.innerHTML = `<input type="checkbox" id="${id}" value="${folder}" ${allowed.includes(folder) ? 'checked' : ''}> ${folder}`;
+        accessFoldersWrap.appendChild(wrap);
+      });
+    }
+
+    function setCollapsed(name, collapsed) {
+      const target = document.querySelector(`[data-collapsible="${name}"] .collapsible-body`) || document.querySelector(`[data-collapsible="${name}"]`);
+      const toggleBtn = document.querySelector(`[data-toggle="${name}"]`);
+      if (target) {
+        if (collapsed) target.classList.add('collapsed'); else target.classList.remove('collapsed');
+      }
+      if (toggleBtn) {
+        toggleBtn.textContent = collapsed ? 'Expand' : 'Collapse';
+      }
+    }
+
+    function setLayout(mode) {
+      const wrap = document.getElementById('docLayoutWrap');
+      if (!wrap) return;
+      const valid = ['row-lr','row-rl','col-tb','col-bt'];
+      const m = valid.includes(mode) ? mode : 'row-lr';
+      wrap.classList.remove('layout-row-lr','layout-row-rl','layout-col-tb','layout-col-bt');
+      wrap.classList.add(`layout-${m}`);
+      state.layout = m;
+      localStorage.setItem('docLayout', m);
+      layoutButtons.forEach(btn => {
+        btn.classList.toggle('secondary', btn.getAttribute('data-layout') !== m);
+        btn.classList.toggle('pill', btn.getAttribute('data-layout') === m);
+      });
+    }
+
+    function renderDocDetail() {
+      if (!state.selectedDoc) return;
+      docDetailCard.classList.remove('hidden');
+      const info = docDetailCard.querySelector('#docInfo');
+      const statusSel = docDetailCard.querySelector('#docStatusSelect');
+      const fieldsWrap = docDetailCard.querySelector('#docFields');
+      const layoutWrap = document.getElementById('docLayoutWrap');
+      setLayout(state.layout);
+
+      statusSel.value = state.selectedDoc.payload.status || 'To Review';
+      if (docReasonSelect) {
+        docReasonSelect.value = state.selectedDoc.payload.reason || '';
+      }
+      const toggleReason = () => {
+        if (!docReasonWrap) return;
+        const show = statusSel.value === 'Rejected';
+        docReasonWrap.classList.toggle('hidden', !show);
+        if (!show && docReasonSelect) docReasonSelect.value = '';
+      };
+      statusSel.onchange = toggleReason;
+      toggleReason();
+      const bucket = state.selectedDoc.source_bucket || (state.selectedDoc.payload && state.selectedDoc.payload.source_bucket) || '';
+      const srcKey = state.selectedDoc.source_file || (state.selectedDoc.payload && state.selectedDoc.payload.source_file) || '';
+      const tokenParam = state.token ? `&token=${encodeURIComponent(state.token)}` : '';
+      const internalPdf = (bucket && srcKey) ? `/api/pdf?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(srcKey)}${tokenParam}` : null;
+      const link = internalPdf ? `<a href="${internalPdf}" target="_blank">Open PDF</a>` : 'No PDF link';
+      info.innerHTML = `<div class="status">File: ${state.selectedDoc.key} | ${link}</div>`;
+
+      fieldsWrap.innerHTML = '';
+      pdfRenderState.highlightBox = null;
+      const norm = state.selectedDoc.payload.normalized_data || [];
+      // Build supplier suggestions from normalized data
+      const supplierNames = new Set();
+      norm.forEach(n => {
+        const k = (n.key || n.field_name || '').toLowerCase();
+        if (k.includes('supplier') || k.includes('vendor') || k.includes('creditor')) {
+          if (n.value) supplierNames.add(n.value);
+        }
+      });
+      let supplierDatalistId = null;
+      if (supplierNames.size) {
+        supplierDatalistId = 'supplier-suggest';
+        let dl = document.getElementById(supplierDatalistId);
+        if (!dl) {
+          dl = document.createElement('datalist');
+          dl.id = supplierDatalistId;
+          document.body.appendChild(dl);
+        }
+        dl.innerHTML = '';
+        supplierNames.forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v;
+          dl.appendChild(opt);
+        });
+      }
+      norm.forEach((f, idx) => {
+        const div = document.createElement('div');
+        const bbox = f.BoundingBox || f.boundingBox || f.value_box || f.box;
+        const fieldKey = f.key || f.field_name || 'Field ' + idx;
+        const conf = normalizeConfidence(f.confidence ?? f.gptConfidence);
+        const color = confidenceColor(conf);
+        const validation = f.validation || {};
+        let badge = '';
+        if (validation.status === 'match') {
+          badge = `<span class="pill green" style="margin-left:6px;">ref</span>`;
+        }
+        div.innerHTML = `
+          <label>${fieldKey}${badge}</label>
+          <input data-field="${fieldKey}" data-left="${bbox && bbox.Left != null ? bbox.Left : ''}" data-top="${bbox && bbox.Top != null ? bbox.Top : ''}" data-width="${bbox && bbox.Width != null ? bbox.Width : ''}" data-height="${bbox && bbox.Height != null ? bbox.Height : ''}" value="${f.value || ''}">
+        `;
+        fieldsWrap.appendChild(div);
+        const inputEl = div.querySelector('input');
+        if (supplierDatalistId && fieldKey.toLowerCase().includes('supplier')) {
+          inputEl.setAttribute('list', supplierDatalistId);
+        }
+        inputEl.style.border = `2px solid ${color}`;
+        inputEl.style.boxShadow = `0 0 0 1px ${color}33`;
+        if (isValidBox(bbox)) {
+          inputEl.addEventListener('focus', () => handleFieldFocus(bbox));
+          inputEl.addEventListener('click', () => handleFieldFocus(bbox));
+        }
+      });
+      if (!norm.length) {
+        fieldsWrap.innerHTML = '<div>No normalized_data</div>';
+      }
+
+      const pdfUrl = internalPdf || state.selectedDoc.pdf_url;
+      renderPdfOverlay(pdfUrl, norm);
+    }
+
+    function scrollToBoundingBox(box) {
+      const container = document.getElementById('pdfContainer');
+      const viewport = pdfRenderState.pageViewport;
+      if (!container || !viewport || !isValidBox(box)) return;
+      const leftPx = (box.Left || 0) * viewport.width;
+      const topPx = (box.Top || 0) * viewport.height;
+      const widthPx = (box.Width || 0) * viewport.width;
+      const heightPx = (box.Height || 0) * viewport.height;
+      container.scrollLeft = Math.max(0, leftPx - (container.clientWidth / 2) + (widthPx / 2));
+      container.scrollTop = Math.max(0, topPx - (container.clientHeight / 2) + (heightPx / 2));
+    }
+
+    function zoomToBoundingBox(box) {
+      if (!isValidBox(box)) return;
+      const container = document.getElementById('pdfContainer');
+      const viewport = pdfRenderState.pageViewport;
+      let targetScale = pdfRenderState.scale;
+      if (container && viewport && box.Width && box.Height) {
+        const boxWidthPx = (box.Width || 0.01) * viewport.width;
+        const boxHeightPx = (box.Height || 0.01) * viewport.height;
+        const scaleW = (container.clientWidth * 0.8) / Math.max(boxWidthPx, 1);
+        const scaleH = (container.clientHeight * 0.8) / Math.max(boxHeightPx, 1);
+        const desired = Math.min(scaleW, scaleH) * 1.2; // zoom in tighter than before
+        targetScale = Math.min(4.0, Math.max(targetScale, desired, 1.5));
+      }
+      targetScale = Math.max(0.5, targetScale);
+      pdfRenderState.scale = targetScale;
+      pdfRenderState.focusBox = box;
+      pdfRenderState.highlightBox = box;
+      renderPdfOverlay(pdfRenderState.url, pdfRenderState.norm);
+    }
+
+    function handleFieldFocus(bbox) {
+      if (!isValidBox(bbox)) return;
+      zoomToBoundingBox(bbox);
+    }
+
+    async function renderPdfOverlay(url, norm) {
+      const canvas = document.getElementById('pdfCanvas');
+      const overlay = document.getElementById('pdfOverlay');
+      const zoomIn = document.getElementById('zoomIn');
+      const zoomOut = document.getElementById('zoomOut');
+      overlay.innerHTML = '';
+
+      if (!url || !window.pdfjsLib) {
+        overlay.innerHTML = '<div style="padding:12px;color:var(--muted);">No PDF to display</div>';
+        return;
+      }
+
+      if (pdfRenderState.url !== url) {
+        pdfRenderState.scale = 1;
+        pdfRenderState.focusBox = null;
+        pdfRenderState.highlightBox = null;
+      }
+      pdfRenderState.url = url;
+      pdfRenderState.norm = norm || [];
+
+      try {
+        const loadingTask = window.pdfjsLib.getDocument({
+          url,
+          withCredentials: false,
+          httpHeaders: state.token ? { 'Authorization': 'Bearer ' + state.token } : {},
+          isEvalSupported: false,
+          disableRange: true,
+        });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: pdfRenderState.scale });
+        pdfRenderState.pageViewport = viewport;
+        const ctx = canvas.getContext('2d');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.style.width = viewport.width + 'px';
+        canvas.style.height = viewport.height + 'px';
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        overlay.style.width = viewport.width + 'px';
+        overlay.style.height = viewport.height + 'px';
+        overlay.style.pointerEvents = 'none';
+        overlay.innerHTML = '';
+        if (pdfRenderState.highlightBox && isValidBox(pdfRenderState.highlightBox)) {
+          const hb = pdfRenderState.highlightBox;
+          const left = (hb.Left || 0) * viewport.width;
+          const top = (hb.Top || 0) * viewport.height;
+          const width = (hb.Width || 0) * viewport.width;
+          const height = (hb.Height || 0) * viewport.height;
+          const hl = document.createElement('div');
+          hl.style.position = 'absolute';
+          hl.style.left = `${left}px`;
+          hl.style.top = `${top}px`;
+          hl.style.width = `${width}px`;
+          hl.style.height = `${height}px`;
+          hl.style.border = `2px solid ${confidenceColor(0.8)}`;
+          hl.style.background = '#60a5fa33';
+          hl.style.pointerEvents = 'none';
+          overlay.appendChild(hl);
+        }
+
+        zoomIn.onclick = () => { pdfRenderState.scale = Math.min(pdfRenderState.scale + 0.1, 3); pdfRenderState.focusBox = null; renderPdfOverlay(url, norm); };
+        zoomOut.onclick = () => { pdfRenderState.scale = Math.max(pdfRenderState.scale - 0.1, 0.5); pdfRenderState.focusBox = null; renderPdfOverlay(url, norm); };
+
+        if (pdfRenderState.focusBox) {
+          scrollToBoundingBox(pdfRenderState.focusBox);
+          pdfRenderState.focusBox = null;
+        }
+      } catch (err) {
+        overlay.innerHTML = `<div style="padding:12px;color:var(--danger);">PDF render error: ${err}</div><div style="padding:6px;color:var(--muted);word-break:break-all;">${url || 'No PDF URL'}</div>`;
+      }
+    }
+
+    async function requestUploadUrl(folder, filename, contentType) {
+      return api('/api/upload-url', {
+        method: 'POST',
+        body: JSON.stringify({ folder, filename, content_type: contentType })
+      });
+    }
+
+    async function putFile(url, file) {
+      const resp = await fetch(url, { method: 'PUT', headers: { 'Content-Type': file.type || 'application/pdf' }, body: file });
+      if (!resp.ok) throw new Error('PUT failed: ' + resp.status);
+    }
+
+    async function pollTextract() {
+      if (!state.current.filename) return;
+      const params = new URLSearchParams({ folder: state.current.folder, filename: state.current.filename });
+      try {
+        const data = await api('/api/textract?' + params.toString(), { method: 'GET' });
+        if (data.status === 'ready') {
+          textractCard.classList.remove('hidden');
+          textractStatus.innerHTML = `<span class="pill green">Ready</span> <code>${data.key}</code>`;
+          renderTextract(data.data || {});
+          lookupExport();
+          clearInterval(state.polling);
+          state.polling = null;
+        } else {
+          textractCard.classList.remove('hidden');
+          textractStatus.innerHTML = `<span class="pill amber">Processing</span>`;
+        }
+      } catch (e) {
+        textractStatus.textContent = 'Status error: ' + e.message;
+      }
+    }
+
+    async function lookupExport() {
+      const params = new URLSearchParams({ folder: state.current.folder, filename: state.current.filename });
+      try {
+        const data = await api('/api/export?' + params.toString(), { method: 'GET' });
+        if (data.status === 'ready' && data.url) {
+          exportLink.innerHTML = `<a href="${data.url}" target="_blank">Download ZIP</a>`;
+        } else {
+          exportLink.innerHTML = '';
+        }
+      } catch (_) {}
+    }
+
+    function renderTextract(json) {
+      rawJson.textContent = JSON.stringify(json, null, 2);
+      const normalized = json.normalized_data || [];
+      if (!normalized.length) {
+        textractData.innerHTML = '<p>normalized_data is empty</p>';
+        return;
+      }
+      let html = '<table><thead><tr><th>Field</th><th>Value</th><th>Confidence</th></tr></thead><tbody>';
+      for (const row of normalized) {
+        const c = colorPill(row.confidence || 0);
+        html += `<tr><td>${row.key || ''}</td><td>${row.value || ''}</td><td><span class="pill ${c}">${(row.confidence || 0).toFixed(2)}</span></td></tr>`;
+      }
+      html += '</tbody></table>';
+      textractData.innerHTML = html;
+    }
+
+    uploadBtn.addEventListener('click', async () => {
+      if (!state.selectedJob) { alert('Select a job first'); return; }
+      const files = Array.from(fileInput.files || []);
+      if (!files.length) { alert('Select file(s)'); return; }
+      const folder = state.selectedJob.folder_prefix || '';
+      try {
+        uploadBtn.disabled = true;
+        statusBox.textContent = `Uploading ${files.length} file(s)...`;
+        let lastKey = null;
+        let lastName = null;
+        for (const file of files) {
+          statusBox.textContent = `Requesting URL for ${file.name}...`;
+          const presign = await requestUploadUrl(folder, file.name, file.type || 'application/pdf');
+          statusBox.textContent = `Uploading ${file.name}...`;
+          await putFile(presign.uploadUrl, file);
+          lastKey = presign.key;
+          lastName = file.name;
+        }
+        statusBox.textContent = 'Upload complete. Waiting for Textract...';
+        if (lastKey && lastName) {
+          state.current = { folder, filename: lastName, key: lastKey };
+          if (state.polling) clearInterval(state.polling);
+          pollTextract();
+          state.polling = setInterval(pollTextract, 6000);
+        }
+      } catch (err) {
+        statusBox.textContent = 'Error: ' + err.message;
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    document.getElementById('refreshDocsBtn').addEventListener('click', () => refreshDocs(true));
+    document.getElementById('docStatusFilter').addEventListener('change', () => refreshDocs(true));
+    const groupBySel = document.getElementById('docGroupBy');
+    const groupDateInput = document.getElementById('groupDateInput');
+    const groupControls = document.getElementById('groupPeriodControls');
+    const groupPrev = document.getElementById('groupPrev');
+    const groupNext = document.getElementById('groupNext');
+    function applyGroupMode(mode) {
+      state.groupMode = mode;
+      localStorage.setItem('docGroupMode', mode);
+        if (groupControls) groupControls.classList.toggle('hidden', mode === 'none');
+        if (mode !== 'none' && !state.groupDate) {
+        state.groupDate = new Date().toISOString().slice(0,10);
+        localStorage.setItem('docGroupDate', state.groupDate);
+      }
+      if (groupDateInput) groupDateInput.value = state.groupDate || '';
+      renderDocs();
+    }
+    if (groupBySel) {
+      groupBySel.addEventListener('change', (e) => applyGroupMode(e.target.value));
+    }
+    if (groupDateInput) {
+      groupDateInput.addEventListener('change', (e) => {
+        state.groupDate = e.target.value;
+        localStorage.setItem('docGroupDate', state.groupDate);
+        renderDocs();
+      });
+    }
+    function shiftPeriod(dir) {
+      if (!state.groupMode || state.groupMode === 'none') return;
+      const base = state.groupDate ? new Date(state.groupDate) : new Date();
+      if (isNaN(base.getTime())) return;
+      if (state.groupMode === 'day') {
+        base.setUTCDate(base.getUTCDate() + dir);
+      } else if (state.groupMode === 'month') {
+        base.setUTCMonth(base.getUTCMonth() + dir);
+      }
+      state.groupDate = base.toISOString().slice(0,10);
+      localStorage.setItem('docGroupDate', state.groupDate);
+      if (groupDateInput) groupDateInput.value = state.groupDate;
+      renderDocs();
+    }
+    if (groupPrev) groupPrev.addEventListener('click', () => shiftPeriod(-1));
+    if (groupNext) groupNext.addEventListener('click', () => shiftPeriod(1));
+
+    docDetailCard.querySelector('#docSaveBtn').addEventListener('click', async () => {
+      if (!state.selectedDoc) return;
+      try {
+        const statusSel = docDetailCard.querySelector('#docStatusSelect');
+        const inputs = docDetailCard.querySelectorAll('input[data-field]');
+        const fields = Array.from(inputs).map(i => ({ field_name: i.dataset.field, value: i.value }));
+        const reasonVal = statusSel.value === 'Rejected' && docReasonSelect ? docReasonSelect.value : '';
+        const currentKey = state.selectedDoc.key;
+        await api('/api/documents', {
+          method: 'PATCH',
+          body: JSON.stringify({ key: state.selectedDoc.key, status: statusSel.value, reason: reasonVal, fields })
+        });
+        await refreshDocs(true);
+        const nextDoc = findNextToReview(currentKey);
+        if (nextDoc) {
+          openDoc(nextDoc);
+        } else {
+          state.selectedDoc = null;
+          docDetailCard.classList.add('hidden');
+          alert('Saved. No more documents To Review.');
+        }
+      } catch (e) {
+        alert('Save error: ' + e.message);
+      }
+    });
+
+    createUserBtn.addEventListener('click', async () => {
+      try {
+        usersStatus.textContent = 'Creating...';
+        await api('/admin/users', {
+          method: 'POST',
+          body: JSON.stringify({ email: userEmail.value, password: userPass.value, role: userRole.value })
+        });
+        usersStatus.textContent = 'User created';
+        refreshUsers();
+      } catch (e) {
+        usersStatus.textContent = 'Error: ' + e.message;
+      }
+    });
+
+    createAccessBtn.addEventListener('click', async () => {
+      try {
+        const userId = parseInt(accessUserSelect.value, 10);
+        if (!userId) { accessStatus.textContent = 'Select user'; return; }
+        const selected = Array.from(accessFoldersWrap.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value);
+        accessStatus.textContent = 'Saving...';
+        await api('/admin/access/bulk', {
+          method: 'POST',
+          body: JSON.stringify({ user_id: userId, folders: selected })
+        });
+        accessStatus.textContent = 'Access updated';
+        refreshAccess();
+      } catch (e) {
+        accessStatus.textContent = 'Error: ' + e.message;
+      }
+    });
+
+    async function refreshUsers() {
+      if (state.role !== 'admin') { usersStatus.textContent = 'No permission'; return; }
+      try {
+        const users = await api('/admin/users');
+        usersTableBody.innerHTML = '';
+        for (const u of users) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${u.email}</td><td>${u.role}</td><td>${u.created_at}</td><td>${u.id !==  state.user?.id ? '<button class="secondary" data-id="'+u.id+'">Delete</button>' : ''}</td>`;
+          const btn = tr.querySelector('button');
+          if (btn) {
+            btn.addEventListener('click', async () => {
+              if (!confirm('Delete user?')) return;
+              try {
+                await api('/admin/users/' + u.id, { method: 'DELETE' });
+                refreshUsers();
+                refreshAccess();
+              } catch (e) {
+                alert('Delete failed: ' + e.message);
+              }
+            });
+          }
+          usersTableBody.appendChild(tr);
+        }
+        usersStatus.textContent = `${users.length} users`;
+        renderAccessUserOptions(users);
+      } catch (e) {
+        usersStatus.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function refreshAccess() {
+      if (state.role !== 'admin') { accessStatus.textContent = 'No permission'; return; }
+      try {
+        const rows = await api('/admin/access');
+        state.userAccess = rows;
+        accessTableBody.innerHTML = '';
+        for (const r of rows) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${r.id}</td><td>${r.user_id}</td><td>${r.folder_prefix}</td><td><button class="secondary" data-id="${r.id}">Delete</button></td>`;
+          tr.querySelector('button').addEventListener('click', async () => {
+            try {
+              await api('/admin/access/' + r.id, { method: 'DELETE' });
+              refreshAccess();
+            } catch (e) {
+              alert('Delete failed: ' + e.message);
+            }
+          });
+          accessTableBody.appendChild(tr);
+        }
+        accessStatus.textContent = `${rows.length} access records`;
+        renderAccessFolders();
+      } catch (e) {
+        accessStatus.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    createJobBtn.addEventListener('click', async () => {
+      try {
+        jobsAdminStatus.textContent = 'Creating...';
+        await api('/admin/jobs', {
+          method: 'POST',
+          body: JSON.stringify({
+            customer: jobCustomer.value,
+            name: jobName.value,
+            job_type: jobType.value,
+            priority: parseInt(jobPriority.value || '0', 10),
+            folder_prefix: jobFolderPrefix.value,
+            active_verifiers: parseInt(jobVerifiers.value || '0', 10),
+          })
+        });
+        jobsAdminStatus.textContent = 'Job created';
+        await refreshJobs();
+        renderAccessFolders();
+      } catch (e) {
+        jobsAdminStatus.textContent = 'Error: ' + e.message;
+      }
+    });
+
+    // Access matrix summary
+    const accessSummaryTableBody = document.createElement('tbody');
+    function renderAccessSummary() {
+      const table = document.getElementById('accessSummaryTable');
+      if (!table) return;
+      table.querySelector('tbody').replaceWith(accessSummaryTableBody);
+    }
+    async function refreshAccessSummary() {
+      const statusEl = document.getElementById('accessSummaryStatus');
+      if (statusEl) statusEl.textContent = 'Loading...';
+      try {
+        const data = await api('/admin/access/summary');
+        accessSummaryTableBody.innerHTML = '';
+        data.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${row.email}</td><td>${row.role}</td><td>${row.jobs.join(', ')}</td>`;
+          accessSummaryTableBody.appendChild(tr);
+        });
+        if (statusEl) statusEl.textContent = `${data.length} users`;
+        renderAccessSummary();
+      } catch (e) {
+        if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    function initFromStorage() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      setTheme(savedTheme);
+      if (state.token) {
+        setUserInfo();
+        showView('jobs');
+        refreshJobs();
+        refreshUsers();
+        refreshAccess();
+        setCollapsed('upload', true);
+        setCollapsed('docs', true);
+        setCollapsed('jobsList', false);
+        if (jobContext) { jobContext.classList.add('hidden'); jobContext.textContent = ''; }
+        if (docsJobLabel) { docsJobLabel.textContent = ''; }
+        const gb = document.getElementById('docGroupBy');
+        if (gb) gb.value = state.groupMode || 'none';
+        const gdi = document.getElementById('groupDateInput');
+        if (gdi) gdi.value = state.groupDate || '';
+      } else {
+        showView('login');
+      }
+    }
+
+    setUserInfo();
+    initFromStorage();
+    document.querySelectorAll('[data-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const name = btn.getAttribute('data-toggle');
+        const body = document.querySelector(`[data-collapsible="${name}"] .collapsible-body`);
+        const isCollapsed = body && body.classList.contains('collapsed');
+        setCollapsed(name, !isCollapsed);
+      });
+    });
+    layoutButtons.forEach(btn => {
+      btn.addEventListener('click', () => setLayout(btn.getAttribute('data-layout')));
+    });
+    const refreshSummaryBtn = document.getElementById('refreshAccessSummaryBtn');
+    if (refreshSummaryBtn) {
+      refreshSummaryBtn.addEventListener('click', refreshAccessSummary);
+    }
+    renderAccessSummary();
+
+    async function downloadExport(status) {
+      if (!state.selectedJob) { alert('Select a job first'); return; }
+      try {
+        const qs = new URLSearchParams({ job: state.selectedJob.folder_prefix });
+        if (status) qs.append('status', status);
+        const resp = await fetch('/api/export/batch?' + qs.toString(), {
+          headers: state.token ? { 'Authorization': 'Bearer ' + state.token } : {}
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `export_${state.selectedJob.folder_prefix}_${status || 'all'}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('Export failed: ' + e.message);
+      }
+    }
+    const exportApprovedBtn = document.getElementById('exportApprovedBtn');
+    const exportRejectedBtn = document.getElementById('exportRejectedBtn');
+    if (exportApprovedBtn) exportApprovedBtn.addEventListener('click', () => downloadExport('Approved'));
+    if (exportRejectedBtn) exportRejectedBtn.addEventListener('click', () => downloadExport('Rejected'));
+
+    async function runCustomerLookup() {
+      if (!customerLookupInput || !customerLookupInput.value.trim()) return;
+      try {
+        if (customerLookupStatus) customerLookupStatus.textContent = 'Searching...';
+        const cid = customerLookupInput.value.trim();
+        const qs = new URLSearchParams({ customer_id: cid });
+        const res = await api('/api/customers/lookup?' + qs.toString());
+        if (!res.found || !res.data || !res.data.length) {
+          if (customerLookupStatus) customerLookupStatus.textContent = `Not found for ${cid}`;
+          return;
+        }
+        const match = res.data[0];
+        if (customerLookupStatus) customerLookupStatus.textContent = `Found ${match.name || ''} (${match.customer_id})`;
+        // populate fields
+        const inputs = docDetailCard.querySelectorAll('input[data-field]');
+        inputs.forEach(inp => {
+          const key = (inp.dataset.field || '').toLowerCase();
+          if (key.includes('supplier') || key.includes('creditor')) {
+            if (match.name) inp.value = match.name;
+            if (key.includes('code') && match.customer_id) inp.value = match.customer_id;
+          }
+          if (key.includes('gst') && match.gst_abn) {
+            inp.value = match.gst_abn;
+          }
+        });
+      } catch (e) {
+        if (customerLookupStatus) customerLookupStatus.textContent = 'Lookup error: ' + e.message;
+      }
+    }
+    if (customerLookupBtn) customerLookupBtn.addEventListener('click', runCustomerLookup);
+    if (customerLookupInput) {
+      customerLookupInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          runCustomerLookup();
+        }
+      });
+    }
+    async function uploadReference() {
+      if (!refUploadInput || !refUploadInput.files.length) { alert('Select a CSV'); return; }
+      const file = refUploadInput.files[0];
+      const form = new FormData();
+      form.append('file', file);
+      if (refStatus) refStatus.textContent = 'Uploading...';
+      try {
+        const resp = await fetch('/admin/reference/upload', {
+          method: 'POST',
+          body: form,
+          headers: state.token ? { 'Authorization': 'Bearer ' + state.token } : {}
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        if (refStatus) refStatus.textContent = `Uploaded ${data.file}, suppliers: ${data.suppliers}`;
+      } catch (e) {
+        if (refStatus) refStatus.textContent = 'Upload error: ' + e.message;
+      }
+    }
+    async function reloadReference() {
+      if (refStatus) refStatus.textContent = 'Reloading...';
+      try {
+        const resp = await api('/admin/reference/reload', { method: 'POST' });
+        if (refStatus) refStatus.textContent = `Reloaded, suppliers: ${resp.suppliers}`;
+      } catch (e) {
+        if (refStatus) refStatus.textContent = 'Reload error: ' + e.message;
+      }
+    }
+    if (refUploadBtn) refUploadBtn.addEventListener('click', uploadReference);
+    if (refReloadBtn) refReloadBtn.addEventListener('click', reloadReference);
+  </script>
+</body>
+</html>
