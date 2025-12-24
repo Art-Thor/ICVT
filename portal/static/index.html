@@ -280,6 +280,23 @@
       </div>
 
       <div class="card">
+        <h2>Billing</h2>
+        <div class="grid">
+          <div><label>Month</label><input id="billingMonth" type="month"></div>
+          <div><label>Job prefix (optional)</label><input id="billingJobPrefix" type="text" placeholder="e.g. JAR"></div>
+        </div>
+        <button class="secondary" id="runBillingBtn">Run billing</button>
+        <button class="secondary" id="downloadBillingCsvBtn">Download Billing CSV</button>
+        <div class="status" id="billingStatus">Not run</div>
+        <div class="table-wrap">
+          <table id="billingTable">
+            <thead><tr><th>Customer</th><th>Job Type</th><th>Jobs</th><th>Documents</th><th>Pages</th><th>To Review</th><th>Approved</th><th>Rejection Status</th><th>Hold</th><th>Exported</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Automation</h2>
         <div class="row" style="align-items:flex-end;">
           <div style="min-width:260px;">
@@ -305,6 +322,7 @@
         </div>
         <button id="refUploadBtn">Upload</button>
         <button class="secondary" id="refReloadBtn">Reload from disk</button>
+        <button class="secondary" id="refImportFtpBtn">Import from FTP</button>
         <div class="status" id="refStatus">Not loaded</div>
       </div>
     </section>
@@ -319,6 +337,7 @@
 	      users: [],
 	      jobConfig: {},
 	      reportData: null,
+	      billingData: null,
 	      fieldMeta: {},
 	      validationErrors: [],
 	      current: { folder: '', filename: '', key: '' },
@@ -363,6 +382,7 @@
     const refUploadInput = document.getElementById('refUploadInput');
     const refUploadBtn = document.getElementById('refUploadBtn');
     const refReloadBtn = document.getElementById('refReloadBtn');
+    const refImportFtpBtn = document.getElementById('refImportFtpBtn');
     const refStatus = document.getElementById('refStatus');
     const docsCard = document.createElement('div');
     docsCard.className = 'card hidden collapsible';
@@ -445,13 +465,17 @@
         <div id="pdfContainer" class="doc-pdf" style="position:relative; border:1px solid var(--border); border-radius:8px; overflow:auto; min-height:400px; background:#0b1623;">
           <canvas id="pdfCanvas" style="width:100%; display:block;"></canvas>
           <div id="pdfOverlay" style="position:absolute; inset:0; pointer-events:none;"></div>
-        </div>
-        <div class="doc-fields">
+	        </div>
+	        <div class="doc-fields">
       <div class="row" style="align-items:flex-end;">
-        <div>
-          <label>Customer ID lookup</label>
-          <input id="customerLookupInput" class="compact-select" placeholder="Enter customer ID">
-        </div>
+        <button id="docLookupBtn" class="secondary">Lookup & Autofill</button>
+        <div id="docLookupStatus" class="status" style="flex:1 1 320px; margin:0;">Lookup not run</div>
+      </div>
+	      <div class="row" style="align-items:flex-end;">
+	        <div>
+	          <label>Customer ID lookup</label>
+	          <input id="customerLookupInput" class="compact-select" placeholder="Enter customer ID">
+	        </div>
         <button id="customerLookupBtn">Lookup</button>
         <div id="customerLookupStatus" class="status" style="min-width:220px;">Lookup not started</div>
       </div>
@@ -496,21 +520,23 @@
 	    `;
 	    docsContainer.appendChild(docDetailCard);
 
-			    const docExportStatus = docDetailCard.querySelector('#docExportStatus');
-			    const docGenerateExportBtn = docDetailCard.querySelector('#docGenerateExportBtn');
-			    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
-			    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
-			    const docValidationStatus = docDetailCard.querySelector('#docValidationStatus');
-		    const customerLookupInput = document.getElementById('customerLookupInput');
-		    const customerLookupBtn = document.getElementById('customerLookupBtn');
-		    const customerLookupStatus = document.getElementById('customerLookupStatus');
+				    const docExportStatus = docDetailCard.querySelector('#docExportStatus');
+				    const docGenerateExportBtn = docDetailCard.querySelector('#docGenerateExportBtn');
+				    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
+				    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
+				    const docValidationStatus = docDetailCard.querySelector('#docValidationStatus');
+				    const docLookupBtn = docDetailCard.querySelector('#docLookupBtn');
+				    const docLookupStatus = docDetailCard.querySelector('#docLookupStatus');
+			    const customerLookupInput = document.getElementById('customerLookupInput');
+			    const customerLookupBtn = document.getElementById('customerLookupBtn');
+			    const customerLookupStatus = document.getElementById('customerLookupStatus');
 
-	    if (docGenerateExportBtn) {
-	      docGenerateExportBtn.addEventListener('click', async () => {
-	        if (!state.selectedDoc) return;
-	        try {
-	          docGenerateExportBtn.disabled = true;
-	          if (docExportStatus) docExportStatus.textContent = 'Generating export…';
+		    if (docGenerateExportBtn) {
+		      docGenerateExportBtn.addEventListener('click', async () => {
+		        if (!state.selectedDoc) return;
+		        try {
+		          docGenerateExportBtn.disabled = true;
+		          if (docExportStatus) docExportStatus.textContent = 'Generating export…';
 	          const res = await api('/api/export/generate', {
 	            method: 'POST',
 	            body: JSON.stringify({ key: state.selectedDoc.key, upload_ftp: false })
@@ -534,12 +560,71 @@
 	            docGenerateExportBtn.disabled = (s === 'To Review' || s === 'Hold' || s === 'Exported');
 	          }
 	        }
-	      });
-	    }
+		      });
+		    }
 
-	    const createUserBtn = document.getElementById('createUserBtn');
-	    const usersStatus = document.getElementById('usersStatus');
-	    const usersTableBody = document.querySelector('#usersTable tbody');
+		    if (docLookupBtn) {
+		      docLookupBtn.addEventListener('click', async () => {
+		        if (!state.selectedDoc) return;
+		        try {
+		          docLookupBtn.disabled = true;
+		          if (docLookupStatus) docLookupStatus.textContent = 'Running lookup...';
+		          const fields = collectDocEdits();
+		          const res = await api('/api/documents/lookup', {
+		            method: 'POST',
+		            body: JSON.stringify({ key: state.selectedDoc.key, fields })
+		          });
+		          const inputs = docDetailCard.querySelectorAll('input[data-field]');
+		          const suggestions = (res && Array.isArray(res.suggested_fields)) ? res.suggested_fields : [];
+		          let applied = 0;
+		          function tryApply(inp, value) {
+		            const meta = getFieldMeta(inp.dataset.field || '');
+		            if (meta.locked) return;
+		            if ((inp.value || '').trim()) return;
+		            inp.value = value;
+		            meta.autofilled = true;
+		            applied += 1;
+		          }
+		          suggestions.forEach(s => {
+		            const field = String(s.field || '').trim();
+		            const value = String(s.value || '').trim();
+		            if (!field || !value) return;
+		            const exact = Array.from(inputs).find(inp => lowerKey(inp.dataset.field) === lowerKey(field));
+		            if (exact) { tryApply(exact, value); return; }
+		            const fk = lowerKey(field);
+		            if (fk.includes('supplier') || fk.includes('vendor') || fk.includes('creditor')) {
+		              inputs.forEach(inp => {
+		                const k = lowerKey(inp.dataset.field);
+		                if (k.includes('supplier') || k.includes('vendor') || k.includes('creditor')) tryApply(inp, value);
+		              });
+		            } else if (fk.includes('gst') || fk.includes('abn')) {
+		              inputs.forEach(inp => {
+		                const k = lowerKey(inp.dataset.field);
+		                if (k.includes('gst') || k.includes('abn')) tryApply(inp, value);
+		              });
+		            }
+		          });
+		          if (applied) scheduleValidate();
+		          const sup = (res && res.supplier) ? res.supplier : {};
+		          const po = (res && res.po) ? res.po : {};
+		          const inv = (res && res.invoice) ? res.invoice : {};
+		          const supName = (sup && sup.selected && sup.selected.data) ? (sup.selected.data.name || sup.selected.data.customer_id || '') : '';
+		          const poNo = (po && po.selected && po.selected.data) ? (po.selected.data.po_number || '') : '';
+		          const invNo = (inv && inv.selected && inv.selected.data) ? (inv.selected.data.invoice_number || '') : '';
+		          if (docLookupStatus) {
+		            docLookupStatus.textContent = `Supplier: ${sup.status || 'n/a'}${supName ? ' (' + supName + ')' : ''} | PO: ${po.status || 'n/a'}${poNo ? ' (' + poNo + ')' : ''} | Invoice: ${inv.status || 'n/a'}${invNo ? ' (' + invNo + ')' : ''} | Applied: ${applied}`;
+		          }
+		        } catch (e) {
+		          if (docLookupStatus) docLookupStatus.textContent = 'Lookup error: ' + e.message;
+		        } finally {
+		          docLookupBtn.disabled = false;
+		        }
+		      });
+		    }
+
+		    const createUserBtn = document.getElementById('createUserBtn');
+		    const usersStatus = document.getElementById('usersStatus');
+		    const usersTableBody = document.querySelector('#usersTable tbody');
     const userEmail = document.getElementById('userEmail');
     const userPass = document.getElementById('userPass');
     const userRole = document.getElementById('userRole');
@@ -563,15 +648,21 @@
 	    const jobConfigSaveBtn = document.getElementById('jobConfigSaveBtn');
 	    const jobConfigStatus = document.getElementById('jobConfigStatus');
 	    const reportMonth = document.getElementById('reportMonth');
-	    const reportJobPrefix = document.getElementById('reportJobPrefix');
-	    const runReportBtn = document.getElementById('runReportBtn');
-	    const downloadReportCsvBtn = document.getElementById('downloadReportCsvBtn');
-	    const reportStatus = document.getElementById('reportStatus');
-	    const reportTableBody = document.querySelector('#reportTable tbody');
-	    const automationEnabled = document.getElementById('automationEnabled');
-	    const automationRefreshBtn = document.getElementById('automationRefreshBtn');
-	    const automationSaveBtn = document.getElementById('automationSaveBtn');
-	    const automationStatus = document.getElementById('automationStatus');
+		    const reportJobPrefix = document.getElementById('reportJobPrefix');
+		    const runReportBtn = document.getElementById('runReportBtn');
+		    const downloadReportCsvBtn = document.getElementById('downloadReportCsvBtn');
+		    const reportStatus = document.getElementById('reportStatus');
+		    const reportTableBody = document.querySelector('#reportTable tbody');
+		    const billingMonth = document.getElementById('billingMonth');
+		    const billingJobPrefix = document.getElementById('billingJobPrefix');
+		    const runBillingBtn = document.getElementById('runBillingBtn');
+		    const downloadBillingCsvBtn = document.getElementById('downloadBillingCsvBtn');
+		    const billingStatus = document.getElementById('billingStatus');
+		    const billingTableBody = document.querySelector('#billingTable tbody');
+		    const automationEnabled = document.getElementById('automationEnabled');
+		    const automationRefreshBtn = document.getElementById('automationRefreshBtn');
+		    const automationSaveBtn = document.getElementById('automationSaveBtn');
+		    const automationStatus = document.getElementById('automationStatus');
 	    const pdfRenderState = {
 	      url: null,
 	      norm: [],
@@ -1907,12 +1998,72 @@
 		      a.remove();
 		      URL.revokeObjectURL(url);
 		    }
-		    if (downloadReportCsvBtn) downloadReportCsvBtn.addEventListener('click', downloadMonthlyReportCsv);
+			    if (downloadReportCsvBtn) downloadReportCsvBtn.addEventListener('click', downloadMonthlyReportCsv);
 
-	    function initFromStorage() {
-	      const savedTheme = localStorage.getItem('theme') || 'dark';
-	      setTheme(savedTheme);
-	      if (state.token) {
+			    async function runBilling() {
+			      if (state.role !== 'admin') return;
+			      const month = (billingMonth && billingMonth.value) ? billingMonth.value : new Date().toISOString().slice(0, 7);
+			      const job = (billingJobPrefix && billingJobPrefix.value || '').trim();
+			      if (billingStatus) billingStatus.textContent = 'Loading...';
+			      if (billingTableBody) billingTableBody.innerHTML = '';
+			      try {
+			        const qs = new URLSearchParams({ month });
+			        if (job) qs.append('job', job);
+			        const data = await api('/api/billing/monthly?' + qs.toString(), { method: 'GET' });
+			        const groups = (data && Array.isArray(data.groups)) ? data.groups : [];
+			        const totals = data && data.totals ? data.totals : null;
+			        state.billingData = { month: (data && data.month) ? data.month : month, groups, totals };
+			        if (billingTableBody) {
+			          groups.forEach(g => {
+			            const by = g.by_status || {};
+			            const tr = document.createElement('tr');
+			            tr.innerHTML = `<td>${g.customer || ''}</td><td>${g.job_type || ''}</td><td>${(g.jobs || []).join(', ')}</td><td>${g.documents || 0}</td><td>${g.pages || 0}</td><td>${by['To Review'] || 0}</td><td>${by['Approved'] || 0}</td><td>${by['Rejected'] || 0}</td><td>${by['Hold'] || 0}</td><td>${by['Exported'] || 0}</td>`;
+			            billingTableBody.appendChild(tr);
+			          });
+			        }
+			        if (billingStatus) {
+			          const td = totals ? totals.documents : 0;
+			          const tp = totals ? totals.pages : 0;
+			          billingStatus.textContent = `Month ${month}: ${td} documents, ${tp} pages (grouped by customer/job type)`;
+			        }
+			      } catch (e) {
+			        state.billingData = null;
+			        if (billingStatus) billingStatus.textContent = 'Error: ' + e.message;
+			      }
+			    }
+			    if (runBillingBtn) runBillingBtn.addEventListener('click', runBilling);
+
+			    async function downloadBillingCsv() {
+			      if (state.role !== 'admin') return;
+			      const month = (billingMonth && billingMonth.value) ? billingMonth.value : new Date().toISOString().slice(0, 7);
+			      const job = (billingJobPrefix && billingJobPrefix.value || '').trim();
+			      try {
+			        const qs = new URLSearchParams({ month });
+			        if (job) qs.append('job', job);
+			        const resp = await fetch('/api/billing/export?' + qs.toString(), {
+			          method: 'GET',
+			          headers: state.token ? { 'Authorization': 'Bearer ' + state.token } : {}
+			        });
+			        if (!resp.ok) throw new Error(await resp.text());
+			        const blob = await resp.blob();
+			        const url = URL.createObjectURL(blob);
+			        const a = document.createElement('a');
+			        a.href = url;
+			        a.download = `billing_${month || 'unknown'}.csv`;
+			        document.body.appendChild(a);
+			        a.click();
+			        a.remove();
+			        URL.revokeObjectURL(url);
+			      } catch (e) {
+			        alert('Billing export failed: ' + e.message);
+			      }
+			    }
+			    if (downloadBillingCsvBtn) downloadBillingCsvBtn.addEventListener('click', downloadBillingCsv);
+
+		    function initFromStorage() {
+		      const savedTheme = localStorage.getItem('theme') || 'dark';
+		      setTheme(savedTheme);
+		      if (state.token) {
         setUserInfo();
         showView('jobs');
         refreshJobs();
@@ -1925,13 +2076,14 @@
         if (docsJobLabel) { docsJobLabel.textContent = ''; }
         const gb = document.getElementById('docGroupBy');
         if (gb) gb.value = state.groupMode || 'none';
-	        const gdi = document.getElementById('groupDateInput');
-	        if (gdi) gdi.value = state.groupDate || '';
-	        if (reportMonth && !reportMonth.value) reportMonth.value = new Date().toISOString().slice(0, 7);
-	      } else {
-	        showView('login');
-	      }
-	    }
+		        const gdi = document.getElementById('groupDateInput');
+		        if (gdi) gdi.value = state.groupDate || '';
+		        if (reportMonth && !reportMonth.value) reportMonth.value = new Date().toISOString().slice(0, 7);
+		        if (billingMonth && !billingMonth.value) billingMonth.value = new Date().toISOString().slice(0, 7);
+		      } else {
+		        showView('login');
+		      }
+		    }
 
     setUserInfo();
     initFromStorage();
@@ -2053,8 +2205,21 @@
         if (refStatus) refStatus.textContent = 'Reload error: ' + e.message;
       }
     }
+    async function importReferenceFromFtp() {
+      if (refStatus) refStatus.textContent = 'Importing from FTP...';
+      try {
+        const resp = await api('/admin/reference/import-ftp', { method: 'POST' });
+        const imported = (resp && Array.isArray(resp.imported)) ? resp.imported.length : 0;
+        const errors = (resp && Array.isArray(resp.errors)) ? resp.errors.length : 0;
+        const sup = (resp && resp.suppliers != null) ? resp.suppliers : '';
+        if (refStatus) refStatus.textContent = `FTP import: ${imported} file(s), ${errors} error(s), suppliers: ${sup}`;
+      } catch (e) {
+        if (refStatus) refStatus.textContent = 'FTP import error: ' + e.message;
+      }
+    }
     if (refUploadBtn) refUploadBtn.addEventListener('click', uploadReference);
     if (refReloadBtn) refReloadBtn.addEventListener('click', reloadReference);
+    if (refImportFtpBtn) refImportFtpBtn.addEventListener('click', importReferenceFromFtp);
   </script>
 </body>
 </html>

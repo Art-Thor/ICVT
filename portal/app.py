@@ -5,7 +5,7 @@ import copy
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -54,6 +54,12 @@ EXPORT_FTP_USER = os.getenv("EXPORT_FTP_USER")
 EXPORT_FTP_PASSWORD = os.getenv("EXPORT_FTP_PASSWORD")
 EXPORT_FTP_DIR = os.getenv("EXPORT_FTP_DIR", "").strip("/")
 EXPORT_FTP_TLS = os.getenv("EXPORT_FTP_TLS", "0").lower() in ("1", "true", "yes")
+REFERENCE_FTP_HOST = os.getenv("REFERENCE_FTP_HOST")
+REFERENCE_FTP_USER = os.getenv("REFERENCE_FTP_USER")
+REFERENCE_FTP_PASSWORD = os.getenv("REFERENCE_FTP_PASSWORD")
+REFERENCE_FTP_DIR = os.getenv("REFERENCE_FTP_DIR", "").strip("/")
+REFERENCE_FTP_TLS = os.getenv("REFERENCE_FTP_TLS", "0").lower() in ("1", "true", "yes")
+REFERENCE_FTP_FILES = [s.strip() for s in os.getenv("REFERENCE_FTP_FILES", "").split(",") if s.strip()]
 DB_URL = os.getenv("DB_URL", f"sqlite:///{Path(__file__).parent / 'portal.db'}")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-secret")
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
@@ -145,7 +151,14 @@ def load_reference_tables():
     REFERENCE_DATA["suppliers"].clear()
     REFERENCE_DATA["po"].clear()
     REFERENCE_DATA["invoices"].clear()
-    REFERENCE_DATA["indexes"] = {"by_id": {}, "by_number": {}, "by_name": set(), "suppliers_by_name": {}, "po_by_number": {}}
+    REFERENCE_DATA["indexes"] = {
+        "by_id": {},
+        "by_number": {},
+        "by_name": set(),
+        "suppliers_by_name": {},
+        "po_by_number": {},
+        "suppliers_by_gst_abn": {},
+    }
 
     def load_csv_filelike(file_obj):
         rows = []
@@ -236,6 +249,11 @@ def load_reference_tables():
             name_up = name.upper()
             REFERENCE_DATA["indexes"]["by_name"].add(name_up)
             REFERENCE_DATA["indexes"].setdefault("suppliers_by_name", {}).setdefault(name_up, []).append(sup)
+        gst_abn = (sup.get("gst_abn") or "").strip()
+        if gst_abn:
+            norm = re.sub(r"[^0-9A-Za-z]+", "", gst_abn).upper()
+            if norm:
+                REFERENCE_DATA["indexes"].setdefault("suppliers_by_gst_abn", {}).setdefault(norm, []).append(sup)
 
     for po in REFERENCE_DATA["po"]:
         po_no = (po.get("PO No") or po.get("PO") or "").strip()
@@ -797,10 +815,48 @@ def _ftp_upload_bytes(remote_path: str, data: bytes):
         ftp.close()
 
 
+def _ftp_download_bytes(remote_path: str) -> bytes:
+    if not (REFERENCE_FTP_HOST and REFERENCE_FTP_USER and REFERENCE_FTP_PASSWORD):
+        raise RuntimeError("Reference FTP is not configured")
+    remote_path = (remote_path or "").lstrip("/")
+    parts = [p for p in remote_path.split("/") if p]
+    if not parts:
+        raise ValueError("remote_path required")
+    filename = parts[-1]
+    dirs = parts[:-1]
+
+    ftp = FTP_TLS(REFERENCE_FTP_HOST) if REFERENCE_FTP_TLS else FTP(REFERENCE_FTP_HOST)
+    ftp.login(REFERENCE_FTP_USER, REFERENCE_FTP_PASSWORD)
+    if REFERENCE_FTP_TLS and isinstance(ftp, FTP_TLS):
+        ftp.prot_p()
+
+    def cwd_safe(path: str):
+        if not path:
+            return
+        ftp.cwd(path)
+
+    if REFERENCE_FTP_DIR:
+        cwd_safe(REFERENCE_FTP_DIR)
+    for d in dirs:
+        cwd_safe(d)
+
+    out = io.BytesIO()
+
+    def _writer(chunk: bytes):
+        out.write(chunk)
+
+    ftp.retrbinary(f"RETR {filename}", _writer)
+    try:
+        ftp.quit()
+    except Exception:
+        ftp.close()
+    return out.getvalue()
+
 def apply_reference_validation(normalized: List[dict]) -> List[dict]:
     by_id = REFERENCE_DATA["indexes"].get("by_id", {})
     by_number = REFERENCE_DATA["indexes"].get("by_number", {})
     by_name = REFERENCE_DATA["indexes"].get("by_name", set())
+    by_gst = REFERENCE_DATA["indexes"].get("suppliers_by_gst_abn", {})
     out = []
     for item in normalized:
         key = (item.get("key") or item.get("field_name") or "").strip()
@@ -818,12 +874,198 @@ def apply_reference_validation(normalized: List[dict]) -> List[dict]:
             if "supplier" in k_low or "vendor" in k_low or "creditor" in k_low:
                 if v_up in by_name:
                     status = "match"
+            if "gst" in k_low or "abn" in k_low:
+                norm = re.sub(r"[^0-9A-Za-z]+", "", val).upper()
+                if norm and norm in by_gst:
+                    status = "match"
         if status != "match":
             status = ""
         item = dict(item)
         item["validation"] = {"status": status}
         out.append(item)
     return out
+
+
+def _lookup_status(count: int) -> str:
+    if count <= 0:
+        return "no_match"
+    if count == 1:
+        return "match"
+    return "ambiguous"
+
+
+def _lookup_result(candidates: List[dict]) -> dict:
+    status = _lookup_status(len(candidates))
+    return {
+        "status": status,
+        "match_count": len(candidates),
+        "candidates": candidates,
+        "selected": candidates[0] if status == "match" else None,
+    }
+
+
+def _supplier_data_from_row(row: dict) -> dict:
+    return {
+        "customer_id": (row.get("customer_id") or row.get("Cre Account") or row.get("Number") or row.get("Customer ID") or "").strip(),
+        "name": (row.get("name") or row.get("Cre Name") or row.get("Name") or row.get("Supplier") or "").strip(),
+        "gst_abn": (row.get("gst_abn") or row.get("GST_ABN") or row.get("GST/ABN") or "").strip(),
+        "currency": (row.get("currency") or row.get("Currency") or "").strip(),
+        "source": row.get("source") or row.get("Source") or "reference",
+    }
+
+
+def _po_data_from_row(row: dict, po_number: str) -> dict:
+    return {
+        "po_number": (row.get("PO No") or row.get("PO") or po_number or "").strip(),
+        "customer_id": (row.get("Cre Account") or row.get("customer_id") or "").strip(),
+        "name": (row.get("Cre Name") or row.get("name") or "").strip(),
+    }
+
+
+def run_unified_lookup(payload: dict, job_prefix: str) -> dict:
+    """
+    Best-effort unified lookup engine.
+    Uses in-memory reference CSVs (loaded from S3 or local) + simple matching rules.
+    """
+    cfg = get_job_config(job_prefix) or {}
+    lookup_cfg = cfg.get("lookup") if isinstance(cfg.get("lookup"), dict) else {}
+
+    po_number = _norm_value(payload, "PO Number", "PO No", "PO")
+    supplier_name = _norm_value(payload, "Supplier/Vendor Name", "Supplier Name", "Supplier", "Vendor", "Creditor Name", "Creditor")
+    gst_abn = _norm_value(payload, "GST/ABN", "GST", "ABN", "GST Number", "ABN Number")
+    invoice_number = _norm_value(payload, "Invoice Number", "Invoice No", "Invoice #")
+    customer_id = _norm_value(payload, "Customer ID", "Customer", "Account Code", "Creditor Code", "Cre Account", "Supplier Code", "Vendor Code")
+
+    po_candidates: List[dict] = []
+    if po_number:
+        rows = REFERENCE_DATA["indexes"].get("po_by_number", {}).get(po_number.upper()) or []
+        for r in rows:
+            data = _po_data_from_row(r, po_number)
+            po_candidates.append(
+                {
+                    "id": data.get("po_number") or po_number,
+                    "confidence": 1.0,
+                    "matched_on": ["po_number"],
+                    "data": data,
+                }
+            )
+
+    supplier_candidates_by_id: Dict[str, dict] = {}
+
+    def upsert_supplier(row: dict, matched_on: str, confidence: float):
+        data = _supplier_data_from_row(row)
+        if not data.get("customer_id") and not data.get("name"):
+            return
+        cid = data.get("customer_id") or data.get("name")
+        key = (cid or "").upper()
+        if not key:
+            return
+        existing = supplier_candidates_by_id.get(key)
+        if existing and float(existing.get("confidence") or 0) >= confidence:
+            return
+        supplier_candidates_by_id[key] = {
+            "id": cid,
+            "confidence": confidence,
+            "matched_on": [matched_on],
+            "data": data,
+        }
+
+    # 1) PO match can derive supplier
+    if po_candidates:
+        for c in po_candidates:
+            po_data = (c.get("data") or {})
+            if po_data.get("customer_id") or po_data.get("name"):
+                upsert_supplier(po_data, "po_number", float(c.get("confidence") or 1.0))
+
+    # 2) GST/ABN match
+    if gst_abn:
+        norm = re.sub(r"[^0-9A-Za-z]+", "", gst_abn).upper()
+        rows = REFERENCE_DATA["indexes"].get("suppliers_by_gst_abn", {}).get(norm) or []
+        for r in rows:
+            upsert_supplier(r, "gst_abn", 1.0)
+
+    # 3) Customer ID match
+    if customer_id:
+        rows = REFERENCE_DATA["indexes"].get("by_id", {}).get(customer_id.upper()) or []
+        for r in rows:
+            upsert_supplier(r, "customer_id", 1.0)
+
+    # 4) Supplier name match (exact)
+    if supplier_name:
+        rows = REFERENCE_DATA["indexes"].get("suppliers_by_name", {}).get(supplier_name.upper()) or []
+        for r in rows:
+            upsert_supplier(r, "supplier_name", 1.0)
+
+    supplier_candidates = list(supplier_candidates_by_id.values())
+    supplier_candidates.sort(key=lambda c: float(c.get("confidence") or 0), reverse=True)
+
+    invoice_candidates: List[dict] = []
+    if invoice_number:
+        rows = REFERENCE_DATA["indexes"].get("by_number", {}).get(invoice_number.upper()) or []
+        for r in rows:
+            inv_no = (r.get("Invoice No") or r.get("invoice_number") or invoice_number or "").strip()
+            cid = (r.get("Cre Account") or r.get("customer_id") or "").strip()
+            invoice_candidates.append(
+                {
+                    "id": inv_no or invoice_number,
+                    "confidence": 1.0,
+                    "matched_on": ["invoice_number"],
+                    "data": {"invoice_number": inv_no or invoice_number, "customer_id": cid},
+                }
+            )
+
+    supplier_res = _lookup_result(supplier_candidates)
+    po_res = _lookup_result(po_candidates)
+    invoice_res = _lookup_result(invoice_candidates)
+
+    # Suggested autofill: safe defaults (client should apply only if field is empty and unlocked).
+    suggested_fields: List[dict] = []
+    selected_supplier = (supplier_res.get("selected") or {}).get("data") if supplier_res.get("status") == "match" else None
+    selected_po = (po_res.get("selected") or {}).get("data") if po_res.get("status") == "match" else None
+
+    def suggest(field_name: str, value: str, source: str, confidence: float = 1.0):
+        v = (value or "").strip()
+        if not v:
+            return
+        suggested_fields.append({"field": field_name, "value": v, "source": source, "confidence": confidence})
+
+    if selected_po:
+        suggest("Supplier/Vendor Name", selected_po.get("name") or "", "po")
+        suggest("Creditor Name", selected_po.get("name") or "", "po")
+    if selected_supplier:
+        suggest("Supplier/Vendor Name", selected_supplier.get("name") or "", "supplier")
+        suggest("Creditor Name", selected_supplier.get("name") or "", "supplier")
+        suggest("GST/ABN", selected_supplier.get("gst_abn") or "", "supplier")
+
+    # Optional config-driven extra suggestions
+    extra_suggestions = lookup_cfg.get("suggest") if isinstance(lookup_cfg.get("suggest"), list) else []
+    for item in extra_suggestions:
+        if not isinstance(item, dict):
+            continue
+        field = (item.get("field") or "").strip()
+        value = (item.get("value") or "").strip()
+        source = (item.get("source") or "config").strip()
+        if field and value:
+            try:
+                conf = float(item.get("confidence") or 1.0)
+            except Exception:
+                conf = 1.0
+            suggest(field, value, source, conf)
+
+    return {
+        "job": job_prefix,
+        "inputs": {
+            "po_number": po_number,
+            "supplier_name": supplier_name,
+            "gst_abn": gst_abn,
+            "invoice_number": invoice_number,
+            "customer_id": customer_id,
+        },
+        "supplier": supplier_res,
+        "po": po_res,
+        "invoice": invoice_res,
+        "suggested_fields": suggested_fields,
+    }
 
 
 def is_key_under_job(key: str, job_prefix: str) -> bool:
@@ -954,6 +1196,10 @@ class DocumentUpdate(BaseModel):
 class DocumentValidateBody(BaseModel):
     key: str = Field(..., description="S3 key under textract-results/")
     fields: Optional[List[NormalizedUpdate]] = Field(None, description="Optional field overrides to validate (not persisted)")
+
+class DocumentLookupBody(BaseModel):
+    key: str = Field(..., description="S3 key under textract-results/")
+    fields: Optional[List[NormalizedUpdate]] = Field(None, description="Optional field overrides to lookup against (not persisted)")
 
 
 class User(Base):
@@ -1638,8 +1884,11 @@ def admin_reference_upload(file: UploadFile = File(...), _: User = Depends(requi
 
     # Persist to S3 so updates survive redeploys.
     if REFERENCE_BUCKET:
-        s3_key = f"{REFERENCE_PREFIX}/{safe_name}" if REFERENCE_PREFIX else safe_name
-        S3.put_object(Bucket=REFERENCE_BUCKET, Key=s3_key, Body=payload)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        active_key = f"{REFERENCE_PREFIX}/{safe_name}" if REFERENCE_PREFIX else safe_name
+        version_key = f"{REFERENCE_PREFIX}/versions/{ts}/{safe_name}" if REFERENCE_PREFIX else f"versions/{ts}/{safe_name}"
+        S3.put_object(Bucket=REFERENCE_BUCKET, Key=version_key, Body=payload)
+        S3.put_object(Bucket=REFERENCE_BUCKET, Key=active_key, Body=payload)
 
     # Also keep a local copy (useful for local dev); best-effort.
     try:
@@ -1652,7 +1901,69 @@ def admin_reference_upload(file: UploadFile = File(...), _: User = Depends(requi
 
     # reload after upload
     load_reference_tables()
-    return {"status": "uploaded", "file": safe_name, "suppliers": len(REFERENCE_DATA["suppliers"])}
+    return {
+        "status": "uploaded",
+        "file": safe_name,
+        "s3_key": (f"{REFERENCE_PREFIX}/{safe_name}" if REFERENCE_PREFIX else safe_name) if REFERENCE_BUCKET else None,
+        "version_key": (f"{REFERENCE_PREFIX}/versions/{ts}/{safe_name}" if REFERENCE_PREFIX else f"versions/{ts}/{safe_name}") if REFERENCE_BUCKET else None,
+        "suppliers": len(REFERENCE_DATA["suppliers"]),
+    }
+
+
+@app.post("/admin/reference/import-ftp")
+def admin_reference_import_ftp(user: User = Depends(require_roles("admin"))):
+    if not (REFERENCE_FTP_HOST and REFERENCE_FTP_USER and REFERENCE_FTP_PASSWORD):
+        raise HTTPException(status_code=400, detail="Reference FTP env is not configured")
+    imported = []
+    errors = []
+    files = REFERENCE_FTP_FILES
+    if not files:
+        # default behavior: try to list remote dir and import all .csv
+        try:
+            ftp = FTP_TLS(REFERENCE_FTP_HOST) if REFERENCE_FTP_TLS else FTP(REFERENCE_FTP_HOST)
+            ftp.login(REFERENCE_FTP_USER, REFERENCE_FTP_PASSWORD)
+            if REFERENCE_FTP_TLS and isinstance(ftp, FTP_TLS):
+                ftp.prot_p()
+            if REFERENCE_FTP_DIR:
+                ftp.cwd(REFERENCE_FTP_DIR)
+            files = [f for f in (ftp.nlst() or []) if str(f).lower().endswith(".csv")]
+            try:
+                ftp.quit()
+            except Exception:
+                ftp.close()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"FTP list failed: {exc}")
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    for name in files:
+        try:
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(name))
+            data = _ftp_download_bytes(name)
+            if not data:
+                raise RuntimeError("Empty file")
+            if REFERENCE_BUCKET:
+                active_key = f"{REFERENCE_PREFIX}/{safe_name}" if REFERENCE_PREFIX else safe_name
+                version_key = f"{REFERENCE_PREFIX}/versions/{ts}/{safe_name}" if REFERENCE_PREFIX else f"versions/{ts}/{safe_name}"
+                S3.put_object(Bucket=REFERENCE_BUCKET, Key=version_key, Body=data)
+                S3.put_object(Bucket=REFERENCE_BUCKET, Key=active_key, Body=data)
+                imported.append({"file": safe_name, "version_key": version_key, "active_key": active_key})
+            else:
+                imported.append({"file": safe_name, "version_key": None, "active_key": None})
+            # also write local best-effort
+            try:
+                REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+                (REFERENCE_DIR / safe_name).write_bytes(data)
+            except Exception:
+                pass
+        except Exception as exc:
+            errors.append({"file": name, "error": str(exc)})
+
+    # reload after import
+    try:
+        load_reference_tables()
+    except Exception:
+        pass
+    return {"status": "ok", "imported": imported, "errors": errors, "suppliers": len(REFERENCE_DATA["suppliers"])}
 
 
 @app.get("/api/job-config")
@@ -1760,6 +2071,177 @@ def report_monthly(
         )
 
     return {"month": month, "jobs": out, "totals": totals}
+
+
+def _billing_blank_totals() -> dict:
+    return {
+        "documents": 0,
+        "pages": 0,
+        "by_status": {s: 0 for s in ("To Review", "Approved", "Rejected", "Hold", "Exported")},
+        "operators": {},
+        "openai_input_tokens": 0,
+        "openai_output_tokens": 0,
+        "openai_total_tokens": 0,
+    }
+
+
+def _billing_accumulate(stats: dict, payload: dict):
+    stats["documents"] += 1
+    st = canonical_status(payload.get("status"))
+    stats["by_status"][st] = stats["by_status"].get(st, 0) + 1
+    pages = payload.get("page_count") or payload.get("pages") or 0
+    try:
+        pages = int(pages)
+    except Exception:
+        pages = 0
+    stats["pages"] += max(pages, 0)
+
+    updated_by = (payload.get("updated_by") or "").strip()
+    exported_by = (payload.get("exported_by") or "").strip()
+    if updated_by:
+        stats["operators"].setdefault(updated_by, {"updated": 0, "exported": 0})
+        stats["operators"][updated_by]["updated"] += 1
+    if exported_by:
+        stats["operators"].setdefault(exported_by, {"updated": 0, "exported": 0})
+        stats["operators"][exported_by]["exported"] += 1
+
+    usage = ((payload.get("openai") or {}).get("usage") or {})
+    if isinstance(usage, dict):
+        for src, dst in (
+            ("input_tokens", "openai_input_tokens"),
+            ("output_tokens", "openai_output_tokens"),
+            ("total_tokens", "openai_total_tokens"),
+        ):
+            try:
+                stats[dst] = int(stats.get(dst) or 0) + int(usage.get(src) or 0)
+            except Exception:
+                continue
+
+
+def compute_billing_monthly(db: Session, month: str, job: Optional[str] = None) -> dict:
+    month = (month or "").strip()
+    if not MONTH_RE.match(month):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    year, mon = month.split("-", 1)
+    start = datetime(int(year), int(mon), 1)
+    if int(mon) == 12:
+        end = datetime(int(year) + 1, 1, 1)
+    else:
+        end = datetime(int(year), int(mon) + 1, 1)
+
+    q = db.query(Job).order_by(Job.priority.desc(), Job.id.desc())
+    if job:
+        job = sanitize_folder(job)
+        q = q.filter(Job.folder_prefix == job)
+    jobs = q.all()
+
+    groups: Dict[Tuple[str, str], dict] = {}
+    totals = _billing_blank_totals()
+
+    for j in jobs:
+        job_prefix = j.folder_prefix
+        if not job_prefix:
+            continue
+        pref = f"textract-results/{job_prefix.strip('/')}/"
+        paginator = S3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=SILVER_BUCKET, Prefix=pref):
+            for obj in page.get("Contents", []):
+                key = obj.get("Key") or ""
+                if not key.lower().endswith(".json"):
+                    continue
+                try:
+                    payload = load_json_from_s3(key)
+                except Exception:
+                    continue
+
+                dt = parse_payload_datetime(payload.get("processed_at")) or parse_payload_datetime(payload.get("updated_at")) or obj.get("LastModified")
+                dt = parse_payload_datetime(dt)
+                if not dt or not (start <= dt < end):
+                    continue
+
+                gk = (j.customer or "", j.job_type or "")
+                group = groups.get(gk)
+                if not group:
+                    group = {"customer": j.customer, "job_type": j.job_type, "jobs": [], **_billing_blank_totals()}
+                    groups[gk] = group
+                if job_prefix not in group["jobs"]:
+                    group["jobs"].append(job_prefix)
+
+                _billing_accumulate(group, payload)
+                _billing_accumulate(totals, payload)
+
+    out = list(groups.values())
+    out.sort(key=lambda r: (str(r.get("customer") or ""), str(r.get("job_type") or "")))
+    return {"month": month, "groups": out, "totals": totals}
+
+
+@app.get("/api/billing/monthly")
+def billing_monthly(
+    month: Optional[str] = None,
+    job: Optional[str] = None,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+):
+    if month is None:
+        month = datetime.utcnow().strftime("%Y-%m")
+    return compute_billing_monthly(db=db, month=month, job=job)
+
+
+@app.get("/api/billing/export")
+def billing_export_csv(
+    month: Optional[str] = None,
+    job: Optional[str] = None,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+):
+    if month is None:
+        month = datetime.utcnow().strftime("%Y-%m")
+    data = compute_billing_monthly(db=db, month=month, job=job)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "customer",
+            "job_type",
+            "jobs",
+            "documents",
+            "pages",
+            "to_review",
+            "approved",
+            "rejected",
+            "hold",
+            "exported",
+            "openai_input_tokens",
+            "openai_output_tokens",
+            "openai_total_tokens",
+        ]
+    )
+    for g in data.get("groups") or []:
+        by = g.get("by_status") or {}
+        writer.writerow(
+            [
+                g.get("customer") or "",
+                g.get("job_type") or "",
+                ";".join(g.get("jobs") or []),
+                g.get("documents") or 0,
+                g.get("pages") or 0,
+                by.get("To Review", 0),
+                by.get("Approved", 0),
+                by.get("Rejected", 0),
+                by.get("Hold", 0),
+                by.get("Exported", 0),
+                g.get("openai_input_tokens") or 0,
+                g.get("openai_output_tokens") or 0,
+                g.get("openai_total_tokens") or 0,
+            ]
+        )
+    csv_bytes = output.getvalue().encode("utf-8")
+    filename = f"billing_{(data.get('month') or 'month')}.csv"
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/documents")
@@ -1923,6 +2405,39 @@ def validate_document_api(
 
     errors = validate_document(payload, job_prefix)
     return {"job": job_prefix, "errors": errors}
+
+
+@app.post("/api/documents/lookup")
+def lookup_document_api(
+    body: DocumentLookupBody,
+    user: User = Depends(require_roles("admin", "verifier", "viewer")),
+    db: Session = Depends(get_db),
+):
+    key = body.key
+    if not key.startswith("textract-results/"):
+        raise HTTPException(status_code=400, detail="Key must be under textract-results/")
+    parts = key.split("/", 2)
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid key")
+    job_prefix = parts[1]
+    ensure_folder_allowed(user, job_prefix, db)
+
+    payload = load_json_from_s3(key)
+    if body.fields:
+        normalized = payload.get("normalized_data") or []
+        for upd in body.fields:
+            found = False
+            for item in normalized:
+                k = item.get("key") or item.get("field_name")
+                if k and k.strip().lower() == upd.field_name.strip().lower():
+                    item["value"] = upd.value
+                    found = True
+                    break
+            if not found:
+                normalized.append({"key": upd.field_name, "value": upd.value, "confidence": 0})
+        payload["normalized_data"] = normalized
+
+    return run_unified_lookup(payload, job_prefix)
 
 
 @app.patch("/api/documents")
