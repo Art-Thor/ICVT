@@ -10,6 +10,8 @@ services:
       - AWS_REGION=${AWS_REGION:-ap-southeast-2}
       - BRONZE_BUCKET=${BRONZE_BUCKET:-bronze-bucket-icvt}
       - SILVER_BUCKET=${SILVER_BUCKET:-silver-bucket-icvt}
+      - INVOICES_TABLE=${INVOICES_TABLE:-invoice-portal-invoices}
+      - AUDIT_TABLE=${AUDIT_TABLE:-invoice-portal-audit}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - JWT_SECRET=${JWT_SECRET:-change-me-secret}
