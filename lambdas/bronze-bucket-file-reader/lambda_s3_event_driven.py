@@ -90,12 +90,16 @@ SILVER_BUCKET = os.getenv("SILVER_BUCKET", "silver-bucket-icvt")
 JOB_CONFIG_BUCKET = os.getenv("JOB_CONFIG_BUCKET") or SILVER_BUCKET
 JOB_CONFIG_PREFIX = os.getenv("JOB_CONFIG_PREFIX", "portal/config/jobs").strip("/")
 JOB_CONFIG_CACHE_TTL_S = int(os.getenv("JOB_CONFIG_CACHE_TTL_S", "60"))
+AUTOMATION_CONFIG_BUCKET = os.getenv("AUTOMATION_CONFIG_BUCKET") or SILVER_BUCKET
+AUTOMATION_CONFIG_KEY = os.getenv("AUTOMATION_CONFIG_KEY", "portal/config/automation.json").strip("/")
+AUTOMATION_CACHE_TTL_S = int(os.getenv("AUTOMATION_CACHE_TTL_S", "30"))
 
 TEXTRACT_POLL_INITIAL_DELAY = float(os.getenv("TEXTRACT_POLL_INITIAL_DELAY", "1.0"))   
 TEXTRACT_POLL_MAX_DELAY = float(os.getenv("TEXTRACT_POLL_MAX_DELAY", "6.0"))           
 TEXTRACT_POLL_MAX_WAIT = float(os.getenv("TEXTRACT_POLL_MAX_WAIT", "240.0"))           
 
 _job_config_cache = {}  # job_prefix -> {"ts": float, "config": dict}
+_automation_cache = {"ts": 0.0, "enabled": True}
 
 NZ_BANK_ACCOUNT_RE = re.compile(r"\b(\d{2})[- ]?(\d{4})[- ]?(\d{7})[- ]?(\d{2})\b")
 AU_BSB_ACCOUNT_RE = re.compile(r"\b(\d{3})[- ]?(\d{3})\b.*?\b(\d{6,10})\b")
@@ -131,6 +135,27 @@ def get_job_config(job_prefix: str) -> dict:
             raise
     _job_config_cache[job_prefix] = {"ts": now, "config": cfg}
     return cfg
+
+
+def is_global_automation_enabled() -> bool:
+    now = time.time()
+    if now - float(_automation_cache.get("ts") or 0) < AUTOMATION_CACHE_TTL_S:
+        return bool(_automation_cache.get("enabled", True))
+
+    enabled = True
+    if AUTOMATION_CONFIG_BUCKET and AUTOMATION_CONFIG_KEY:
+        try:
+            obj = S3.get_object(Bucket=AUTOMATION_CONFIG_BUCKET, Key=AUTOMATION_CONFIG_KEY)
+            data = json.loads(obj["Body"].read())
+            if isinstance(data, dict) and "enabled" in data:
+                enabled = bool(data.get("enabled"))
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+                raise
+
+    _automation_cache["ts"] = now
+    _automation_cache["enabled"] = bool(enabled)
+    return bool(enabled)
 
 
 def _extract_bank_account_candidate(forms_data: list[dict]):
@@ -558,7 +583,12 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
         cfg = get_job_config(job_prefix) or {}
 
         auto_cfg = cfg.get("auto_processing") if isinstance(cfg.get("auto_processing"), dict) else {}
-        approve_threshold = auto_cfg.get("approve_min_confidence") or auto_cfg.get("approve_threshold") or cfg.get("approve_min_confidence") or cfg.get("auto_approve_threshold")
+        approve_threshold = (
+            auto_cfg.get("approve_min_confidence")
+            or auto_cfg.get("approve_threshold")
+            or cfg.get("approve_min_confidence")
+            or cfg.get("auto_approve_threshold")
+        )
         hold_threshold = auto_cfg.get("hold_below_confidence") or auto_cfg.get("hold_below")
         strategy = str(auto_cfg.get("strategy") or "min_required").strip().lower()
 
@@ -569,6 +599,7 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
         doc_conf = _compute_doc_confidence(normalized_kv, [str(x) for x in required_fields], strategy)
         status = "To Review"
         decision = None
+        global_enabled = is_global_automation_enabled()
         try:
             approve_threshold = float(approve_threshold) if approve_threshold is not None else None
         except Exception:
@@ -578,7 +609,9 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
         except Exception:
             hold_threshold = None
 
-        if approve_threshold is not None:
+        if not global_enabled:
+            decision = "disabled"
+        elif approve_threshold is not None:
             if doc_conf >= approve_threshold:
                 status = "Approved"
                 decision = "Approved"
@@ -598,6 +631,7 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
             "page_count": page_count,
             "openai": {"model": OPENAI_MODEL, "usage": openai_usage},
             "auto_processing": {
+                "enabled": global_enabled,
                 "strategy": strategy,
                 "required_fields": required_fields,
                 "doc_confidence": doc_conf,

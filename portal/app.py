@@ -46,6 +46,9 @@ REFERENCE_PREFIX = os.getenv("REFERENCE_PREFIX", "portal/reference").strip("/")
 JOB_CONFIG_BUCKET = os.getenv("JOB_CONFIG_BUCKET") or SILVER_BUCKET
 JOB_CONFIG_PREFIX = os.getenv("JOB_CONFIG_PREFIX", "portal/config/jobs").strip("/")
 JOB_CONFIG_CACHE_TTL_S = int(os.getenv("JOB_CONFIG_CACHE_TTL_S", "30"))
+AUTOMATION_CONFIG_BUCKET = os.getenv("AUTOMATION_CONFIG_BUCKET") or JOB_CONFIG_BUCKET or SILVER_BUCKET
+AUTOMATION_CONFIG_KEY = os.getenv("AUTOMATION_CONFIG_KEY", "portal/config/automation.json").strip("/")
+AUTOMATION_CACHE_TTL_S = int(os.getenv("AUTOMATION_CACHE_TTL_S", "10"))
 EXPORT_FTP_HOST = os.getenv("EXPORT_FTP_HOST")
 EXPORT_FTP_USER = os.getenv("EXPORT_FTP_USER")
 EXPORT_FTP_PASSWORD = os.getenv("EXPORT_FTP_PASSWORD")
@@ -82,6 +85,7 @@ REFERENCE_DATA = {
 }
 
 _JOB_CONFIG_CACHE = {}  # job_prefix -> {"ts": float, "config": dict}
+_AUTOMATION_CACHE = {"ts": 0.0, "config": None}
 
 
 def sanitize_folder(folder: Optional[str]) -> str:
@@ -455,6 +459,51 @@ def save_job_config(job_prefix: str, config: dict):
         ContentType="application/json",
     )
     _JOB_CONFIG_CACHE.pop(job_prefix, None)
+
+
+def get_automation_config() -> dict:
+    now = time.time()
+    cached = _AUTOMATION_CACHE.get("config")
+    if cached is not None and (now - float(_AUTOMATION_CACHE.get("ts") or 0) < AUTOMATION_CACHE_TTL_S):
+        return cached
+
+    cfg: dict = {"enabled": True}
+    if AUTOMATION_CONFIG_BUCKET and AUTOMATION_CONFIG_KEY:
+        try:
+            obj = S3.get_object(Bucket=AUTOMATION_CONFIG_BUCKET, Key=AUTOMATION_CONFIG_KEY)
+            data = json.loads(obj["Body"].read())
+            if isinstance(data, dict):
+                cfg.update(data)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+                raise
+
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    _AUTOMATION_CACHE["ts"] = now
+    _AUTOMATION_CACHE["config"] = cfg
+    return cfg
+
+
+def is_automation_enabled() -> bool:
+    return bool(get_automation_config().get("enabled", True))
+
+
+def save_automation_config(enabled: bool, updated_by: str):
+    if not (AUTOMATION_CONFIG_BUCKET and AUTOMATION_CONFIG_KEY):
+        raise HTTPException(status_code=500, detail="Automation config storage is not configured")
+    cfg = {
+        "enabled": bool(enabled),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_by": updated_by,
+    }
+    S3.put_object(
+        Bucket=AUTOMATION_CONFIG_BUCKET,
+        Key=AUTOMATION_CONFIG_KEY,
+        Body=json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+    _AUTOMATION_CACHE["ts"] = time.time()
+    _AUTOMATION_CACHE["config"] = cfg
 
 
 def _normalized_field_map(payload: dict) -> dict:
@@ -874,6 +923,11 @@ class JobConfigBody(BaseModel):
 class PresencePing(BaseModel):
     folder_prefix: str
 
+
+class AutomationToggleBody(BaseModel):
+    enabled: bool
+
+
 class ExportGenerateBody(BaseModel):
     key: str
     upload_ftp: bool = False
@@ -895,6 +949,11 @@ class DocumentUpdate(BaseModel):
     status: Optional[str] = Field(None, description="Approved/Rejected/Hold/To Review/Exported")
     fields: Optional[List[NormalizedUpdate]] = Field(None, description="Fields from normalized_data to update")
     reason: Optional[str] = Field(None, description="Optional rejection reason")
+
+
+class DocumentValidateBody(BaseModel):
+    key: str = Field(..., description="S3 key under textract-results/")
+    fields: Optional[List[NormalizedUpdate]] = Field(None, description="Optional field overrides to validate (not persisted)")
 
 
 class User(Base):
@@ -1124,6 +1183,17 @@ def presence_ping(
     db.add(row)
     db.commit()
     return {"status": "ok", "folder_prefix": folder, "last_seen": now.isoformat()}
+
+
+@app.get("/api/automation")
+def api_get_automation(_: User = Depends(require_roles("admin"))):
+    return get_automation_config()
+
+
+@app.post("/admin/automation")
+def admin_set_automation(body: AutomationToggleBody, user: User = Depends(require_roles("admin"))):
+    save_automation_config(body.enabled, user.email)
+    return {"status": "saved", **get_automation_config()}
 
 
 @app.post("/admin/users")
@@ -1529,7 +1599,7 @@ def customer_lookup(
     key = cid.upper()
     matches = REFERENCE_DATA["indexes"].get("by_id", {}).get(key, [])
     if not matches:
-        return {"found": False, "customer_id": cid, "data": []}
+        return {"found": False, "status": "no_match", "match_count": 0, "customer_id": cid, "data": []}
     # Build simplified response
     resp = []
     for m in matches:
@@ -1543,7 +1613,15 @@ def customer_lookup(
                 "raw": m,
             }
         )
-    return {"found": True, "customer_id": cid, "data": resp}
+    status = "match" if len(resp) == 1 else "ambiguous"
+    return {
+        "found": True,
+        "status": status,
+        "match_count": len(resp),
+        "customer_id": cid,
+        "data": resp,
+        "selected": resp[0] if status == "match" else None,
+    }
 
 
 @app.post("/admin/reference/reload")
@@ -1805,6 +1883,46 @@ def document_detail(
         payload["normalized_data"] = apply_reference_validation(payload["normalized_data"])
 
     return {"payload": payload, "pdf_url": pdf_url, "key": key, "ddb": None, "source_bucket": source_bucket, "source_key": source_key}
+
+
+@app.post("/api/documents/validate")
+def validate_document_api(
+    body: DocumentValidateBody,
+    user: User = Depends(require_roles("admin", "verifier")),
+    db: Session = Depends(get_db),
+):
+    key = body.key
+    if not key.startswith("textract-results/"):
+        raise HTTPException(status_code=400, detail="Key must be under textract-results/")
+    parts = key.split("/", 2)
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid key")
+    job_prefix = parts[1]
+    ensure_folder_allowed(user, job_prefix, db)
+
+    payload = load_json_from_s3(key)
+    if body.fields:
+        normalized = payload.get("normalized_data") or []
+        for upd in body.fields:
+            found = False
+            for item in normalized:
+                k = item.get("key") or item.get("field_name")
+                if k and k.strip().lower() == upd.field_name.strip().lower():
+                    item["value"] = upd.value
+                    found = True
+                    break
+            if not found:
+                normalized.append(
+                    {
+                        "key": upd.field_name,
+                        "value": upd.value,
+                        "confidence": 0,
+                    }
+                )
+        payload["normalized_data"] = normalized
+
+    errors = validate_document(payload, job_prefix)
+    return {"job": job_prefix, "errors": errors}
 
 
 @app.patch("/api/documents")

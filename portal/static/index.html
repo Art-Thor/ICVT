@@ -82,13 +82,14 @@
     .doc-fields { flex: 1 1 320px; min-width: 280px; max-height: 80vh; overflow: auto; }
     .zoom-controls { display: inline-flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
     .legend { display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px; color:var(--muted); margin:10px 0; }
-    .legend span { display:inline-flex; align-items:center; gap:6px; }
-    .legend .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
-    .legend .dot.green { background:#22c55e; }
-    .legend .dot.amber { background:#fbbf24; }
-    .legend .dot.red { background:#ef4444; }
-    .compact-select { max-width: 220px; min-width: 180px; width: 100%; }
-  </style>
+	    .legend span { display:inline-flex; align-items:center; gap:6px; }
+	    .legend .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
+	    .legend .dot.green { background:#22c55e; }
+	    .legend .dot.amber { background:#fbbf24; }
+	    .legend .dot.red { background:#ef4444; }
+	    .field-error { color: var(--danger); font-size: 12px; margin-top: 4px; min-height: 14px; }
+	    .compact-select { max-width: 220px; min-width: 180px; width: 100%; }
+	  </style>
   <script src="/static/pdf.min.js"></script>
 </head>
 <body>
@@ -268,12 +269,29 @@
           <div><label>Job prefix (optional)</label><input id="reportJobPrefix" type="text" placeholder="e.g. JAR"></div>
         </div>
         <button class="secondary" id="runReportBtn">Run report</button>
+        <button class="secondary" id="downloadReportCsvBtn">Download CSV</button>
         <div class="status" id="reportStatus">Not run</div>
         <div class="table-wrap">
           <table id="reportTable">
             <thead><tr><th>Job</th><th>Documents</th><th>Pages</th><th>To Review</th><th>Approved</th><th>Rejection Status</th><th>Hold</th><th>Exported</th></tr></thead>
             <tbody></tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Automation</h2>
+        <div class="row" style="align-items:flex-end;">
+          <div style="min-width:260px;">
+            <label>Global automation</label>
+            <select id="automationEnabled" class="compact-select">
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+          <button class="secondary" id="automationRefreshBtn">Refresh</button>
+          <button id="automationSaveBtn">Save</button>
+          <div class="status" id="automationStatus" style="flex:1 1 320px; margin:0;">Unknown</div>
         </div>
       </div>
 
@@ -300,6 +318,9 @@
 	      jobs: [],
 	      users: [],
 	      jobConfig: {},
+	      reportData: null,
+	      fieldMeta: {},
+	      validationErrors: [],
 	      current: { folder: '', filename: '', key: '' },
 	      polling: null,
 	      selectedJob: null,
@@ -382,10 +403,11 @@
             <button class="secondary" id="groupNext">→</button>
           </div>
         </div>
-        <button id="refreshDocsBtn" class="secondary">Refresh</button>
-        <button id="exportApprovedBtn" class="secondary">Export Approved</button>
-        <button id="exportRejectedBtn" class="secondary">Export Rejected</button>
-      </div>
+	        <button id="refreshDocsBtn" class="secondary">Refresh</button>
+	        <button id="exportApprovedBtn" class="secondary">Export Approved</button>
+	        <button id="exportRejectedBtn" class="secondary">Export Rejected</button>
+	        <button id="exportHoldBtn" class="secondary">Export Hold</button>
+	      </div>
       <div class="table-wrap">
         <table id="docsTable">
           <thead><tr>
@@ -433,17 +455,18 @@
         <button id="customerLookupBtn">Lookup</button>
         <div id="customerLookupStatus" class="status" style="min-width:220px;">Lookup not started</div>
       </div>
-          <div class="legend">
-            <strong>Confidence legend:</strong>
-            <span><span class="dot green"></span>80%+</span>
-            <span><span class="dot amber"></span>70–79%</span>
-            <span><span class="dot red"></span><70%</span>
-          </div>
-          <div class="grid" id="docFields"></div>
-        </div>
-      </div>
-      <div class="row" style="align-items:flex-end;">
-        <div>
+	          <div class="legend">
+	            <strong>Confidence legend:</strong>
+	            <span><span class="dot green"></span>80%+</span>
+	            <span><span class="dot amber"></span>70–79%</span>
+	            <span><span class="dot red"></span><70%</span>
+	          </div>
+	          <div class="grid" id="docFields"></div>
+	          <div id="docValidationStatus" class="status" style="margin-top:12px;">Validation not checked</div>
+	        </div>
+	      </div>
+	      <div class="row" style="align-items:flex-end;">
+	        <div>
           <label style="width:120px;">Status</label>
           <select id="docStatusSelect" class="compact-select">
             <option value="To Review">To Review</option>
@@ -473,13 +496,14 @@
 	    `;
 	    docsContainer.appendChild(docDetailCard);
 
-		    const docExportStatus = docDetailCard.querySelector('#docExportStatus');
-		    const docGenerateExportBtn = docDetailCard.querySelector('#docGenerateExportBtn');
-		    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
-		    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
-	    const customerLookupInput = document.getElementById('customerLookupInput');
-	    const customerLookupBtn = document.getElementById('customerLookupBtn');
-	    const customerLookupStatus = document.getElementById('customerLookupStatus');
+			    const docExportStatus = docDetailCard.querySelector('#docExportStatus');
+			    const docGenerateExportBtn = docDetailCard.querySelector('#docGenerateExportBtn');
+			    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
+			    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
+			    const docValidationStatus = docDetailCard.querySelector('#docValidationStatus');
+		    const customerLookupInput = document.getElementById('customerLookupInput');
+		    const customerLookupBtn = document.getElementById('customerLookupBtn');
+		    const customerLookupStatus = document.getElementById('customerLookupStatus');
 
 	    if (docGenerateExportBtn) {
 	      docGenerateExportBtn.addEventListener('click', async () => {
@@ -541,8 +565,13 @@
 	    const reportMonth = document.getElementById('reportMonth');
 	    const reportJobPrefix = document.getElementById('reportJobPrefix');
 	    const runReportBtn = document.getElementById('runReportBtn');
+	    const downloadReportCsvBtn = document.getElementById('downloadReportCsvBtn');
 	    const reportStatus = document.getElementById('reportStatus');
 	    const reportTableBody = document.querySelector('#reportTable tbody');
+	    const automationEnabled = document.getElementById('automationEnabled');
+	    const automationRefreshBtn = document.getElementById('automationRefreshBtn');
+	    const automationSaveBtn = document.getElementById('automationSaveBtn');
+	    const automationStatus = document.getElementById('automationStatus');
 	    const pdfRenderState = {
 	      url: null,
 	      norm: [],
@@ -571,19 +600,19 @@
 
     function setUserInfo() {
       if (state.token) {
-        userInfo.innerHTML = `<span class="pill green">${state.role}</span> ${state.email} <button class="secondary" onclick="logout()">Logout</button>`;
-        navContainer.classList.remove('hidden');
-        if (adminBtn) adminBtn.style.display = state.role === 'admin' ? '' : 'none';
-        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn')];
-        exportBtns.forEach(btn => { if (btn) btn.style.display = state.role === 'admin' ? '' : 'none'; });
-      } else {
-        userInfo.textContent = 'Not authenticated';
-        navContainer.classList.add('hidden');
-        if (adminBtn) adminBtn.style.display = 'none';
-        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn')];
-        exportBtns.forEach(btn => { if (btn) btn.style.display = 'none'; });
-      }
-    }
+	        userInfo.innerHTML = `<span class="pill green">${state.role}</span> ${state.email} <button class="secondary" onclick="logout()">Logout</button>`;
+	        navContainer.classList.remove('hidden');
+	        if (adminBtn) adminBtn.style.display = state.role === 'admin' ? '' : 'none';
+	        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn'), document.getElementById('exportHoldBtn')];
+	        exportBtns.forEach(btn => { if (btn) btn.style.display = state.role === 'admin' ? '' : 'none'; });
+	      } else {
+	        userInfo.textContent = 'Not authenticated';
+	        navContainer.classList.add('hidden');
+	        if (adminBtn) adminBtn.style.display = 'none';
+	        const exportBtns = [document.getElementById('exportApprovedBtn'), document.getElementById('exportRejectedBtn'), document.getElementById('exportHoldBtn')];
+	        exportBtns.forEach(btn => { if (btn) btn.style.display = 'none'; });
+	      }
+	    }
     function setTheme(theme) {
       const t = theme === 'light' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', t);
@@ -601,13 +630,13 @@
 	      setUserInfo(); showView('login');
 	    }
 
-    navButtons.forEach(btn => btn.addEventListener('click', () => {
-      const v = btn.dataset.view;
-      if (v === 'admin' && state.role !== 'admin') return alert('Admin only');
-      showView(v);
-      if (v === 'jobs') refreshJobs();
-      if (v === 'admin') { refreshUsers(); refreshAccess(); refreshJobs(); refreshAccessSummary(); }
-    }));
+	    navButtons.forEach(btn => btn.addEventListener('click', () => {
+	      const v = btn.dataset.view;
+	      if (v === 'admin' && state.role !== 'admin') return alert('Admin only');
+	      showView(v);
+	      if (v === 'jobs') refreshJobs();
+	      if (v === 'admin') { refreshUsers(); refreshAccess(); refreshJobs(); refreshAccessSummary(); refreshAutomation(); }
+	    }));
     if (themeToggle) {
       themeToggle.addEventListener('click', () => {
         const current = localStorage.getItem('theme') || 'dark';
@@ -657,20 +686,24 @@
 	      if (text) {
 	        try { data = JSON.parse(text); } catch (_) { data = null; }
 	      }
-	      if (!resp.ok) {
-	        const detail = data && (data.detail ?? data.error ?? data.message);
-	        let msg = text || resp.statusText || 'Request failed';
-	        if (typeof detail === 'string') {
-	          msg = detail;
-	        } else if (detail && typeof detail === 'object') {
-	          msg = detail.message || msg;
-	          if (Array.isArray(detail.errors) && detail.errors.length) {
-	            const parts = detail.errors.slice(0, 6).map(e => `${e.field || 'field'}: ${e.error || 'invalid'}`);
-	            msg += ` (${parts.join(', ')}${detail.errors.length > 6 ? '…' : ''})`;
-	          }
-	        }
-	        throw new Error(msg);
-	      }
+		      if (!resp.ok) {
+		        const detail = data && (data.detail ?? data.error ?? data.message);
+		        let msg = text || resp.statusText || 'Request failed';
+		        if (typeof detail === 'string') {
+		          msg = detail;
+		        } else if (detail && typeof detail === 'object') {
+		          msg = detail.message || msg;
+		          if (Array.isArray(detail.errors) && detail.errors.length) {
+		            const parts = detail.errors.slice(0, 6).map(e => `${e.field || 'field'}: ${e.error || 'invalid'}`);
+		            msg += ` (${parts.join(', ')}${detail.errors.length > 6 ? '…' : ''})`;
+		          }
+		        }
+		        const err = new Error(msg);
+		        err.status = resp.status;
+		        err.data = data;
+		        err.raw = text;
+		        throw err;
+		      }
 	      return data ?? {};
 	    }
 
@@ -945,31 +978,158 @@
       }
     }
 
-    function setLayout(mode) {
-      const wrap = document.getElementById('docLayoutWrap');
-      if (!wrap) return;
+	    function setLayout(mode) {
+	      const wrap = document.getElementById('docLayoutWrap');
+	      if (!wrap) return;
       const valid = ['row-lr','row-rl','col-tb','col-bt'];
       const m = valid.includes(mode) ? mode : 'row-lr';
       wrap.classList.remove('layout-row-lr','layout-row-rl','layout-col-tb','layout-col-bt');
       wrap.classList.add(`layout-${m}`);
       state.layout = m;
       localStorage.setItem('docLayout', m);
-      layoutButtons.forEach(btn => {
-        btn.classList.toggle('secondary', btn.getAttribute('data-layout') !== m);
-        btn.classList.toggle('pill', btn.getAttribute('data-layout') === m);
-      });
-    }
+	      layoutButtons.forEach(btn => {
+	        btn.classList.toggle('secondary', btn.getAttribute('data-layout') !== m);
+	        btn.classList.toggle('pill', btn.getAttribute('data-layout') === m);
+	      });
+	    }
 
-	    function renderDocDetail() {
+	    function lowerKey(s) {
+	      return String(s || '').trim().toLowerCase();
+	    }
+
+	    function collectDocEdits() {
+	      const inputs = docDetailCard.querySelectorAll('input[data-field]');
+	      return Array.from(inputs).map(i => ({ field_name: i.dataset.field, value: i.value }));
+	    }
+
+	    function getFieldMeta(fieldKey) {
+	      const k = lowerKey(fieldKey);
+	      if (!state.fieldMeta[k]) state.fieldMeta[k] = { locked: false, autofilled: false };
+	      return state.fieldMeta[k];
+	    }
+
+	    function clearValidationUI() {
+	      state.validationErrors = [];
+	      const wraps = docDetailCard.querySelectorAll('.field-error');
+	      wraps.forEach(w => { w.textContent = ''; });
+	      const inputs = docDetailCard.querySelectorAll('input[data-field]');
+	      inputs.forEach(inp => {
+	        inp.classList.remove('has-validation-error');
+	        const baseBorder = inp.dataset.baseBorder;
+	        const baseShadow = inp.dataset.baseShadow;
+	        if (baseBorder) inp.style.border = `2px solid ${baseBorder}`;
+	        if (baseShadow) inp.style.boxShadow = baseShadow;
+	      });
+	      if (docValidationStatus) docValidationStatus.textContent = 'Validation not checked';
+	    }
+
+	    function renderValidationErrors(errors) {
+	      state.validationErrors = Array.isArray(errors) ? errors : [];
+	      const byField = {};
+	      state.validationErrors.forEach(e => {
+	        const k = lowerKey(e.field);
+	        if (!k) return;
+	        byField[k] = e;
+	      });
+	      const inputs = docDetailCard.querySelectorAll('input[data-field]');
+	      inputs.forEach(inp => {
+	        const wrap = inp.closest('div');
+	        const errEl = wrap ? wrap.querySelector('.field-error') : null;
+	        if (errEl) errEl.textContent = '';
+	        const baseBorder = inp.dataset.baseBorder;
+	        const baseShadow = inp.dataset.baseShadow;
+	        if (baseBorder) inp.style.border = `2px solid ${baseBorder}`;
+	        if (baseShadow) inp.style.boxShadow = baseShadow;
+
+	        const k = lowerKey(inp.dataset.field);
+	        const err = byField[k];
+	        const msg = err ? (err.error === 'required' ? 'Required' : err.error === 'invalid_date' ? 'Invalid date' : err.error === 'invalid_amount' ? 'Invalid amount' : String(err.error || 'Invalid')) : '';
+	        if (errEl) errEl.textContent = msg;
+	        if (err) {
+	          inp.style.border = '2px solid var(--danger)';
+	          inp.style.boxShadow = '0 0 0 2px rgba(239,68,68,0.25)';
+	        }
+	      });
+	      if (docValidationStatus) {
+	        if (!state.validationErrors.length) {
+	          docValidationStatus.innerHTML = `<span class="pill green">OK</span> No validation errors`;
+	        } else {
+	          docValidationStatus.innerHTML = `<span class="pill red">Errors</span> ${state.validationErrors.length} field(s) need attention`;
+	        }
+	      }
+	    }
+
+	    let _validateTimer = null;
+	    async function validateSelectedDoc() {
 	      if (!state.selectedDoc) return;
-	      docDetailCard.classList.remove('hidden');
-	      const info = docDetailCard.querySelector('#docInfo');
-	      const statusSel = docDetailCard.querySelector('#docStatusSelect');
-	      const fieldsWrap = docDetailCard.querySelector('#docFields');
-	      const layoutWrap = document.getElementById('docLayoutWrap');
-	      setLayout(state.layout);
+	      try {
+	        const fields = collectDocEdits();
+	        const res = await api('/api/documents/validate', { method: 'POST', body: JSON.stringify({ key: state.selectedDoc.key, fields }) });
+	        renderValidationErrors(res && res.errors ? res.errors : []);
+	      } catch (e) {
+	        if (docValidationStatus) docValidationStatus.textContent = 'Validation error: ' + e.message;
+	      }
+	    }
+	    function scheduleValidate() {
+	      if (_validateTimer) clearTimeout(_validateTimer);
+	      _validateTimer = setTimeout(validateSelectedDoc, 350);
+	    }
 
-	      statusSel.value = state.selectedDoc.payload.status || 'To Review';
+	    async function autofillFromCustomerId() {
+	      if (!state.selectedDoc) return;
+	      const inputs = docDetailCard.querySelectorAll('input[data-field]');
+	      const candidates = Array.from(inputs).filter(inp => {
+	        const k = lowerKey(inp.dataset.field);
+	        return k.includes('customer') || k.includes('creditor code') || k.includes('cre account') || k.includes('account code');
+	      });
+	      const cid = (candidates.length ? candidates[0].value : '').trim();
+	      if (!cid) return;
+	      try {
+	        const qs = new URLSearchParams({ customer_id: cid });
+	        const res = await api('/api/customers/lookup?' + qs.toString(), { method: 'GET' });
+	        if (!res || res.status !== 'match' || !res.selected) return;
+	        const match = res.selected;
+	        let changed = false;
+	        inputs.forEach(inp => {
+	          const key = lowerKey(inp.dataset.field);
+	          const meta = getFieldMeta(inp.dataset.field);
+	          if (meta.locked) return;
+	          if (!inp.value.trim()) {
+	            if ((key.includes('supplier') || key.includes('creditor')) && match.name) {
+	              inp.value = match.name;
+	              meta.autofilled = true;
+	              changed = true;
+	            }
+	            if ((key.includes('gst') || key.includes('abn')) && match.gst_abn) {
+	              inp.value = match.gst_abn;
+	              meta.autofilled = true;
+	              changed = true;
+	            }
+	          }
+	          if (key.includes('code') && match.customer_id && !inp.value.trim()) {
+	            inp.value = match.customer_id;
+	            meta.autofilled = true;
+	            changed = true;
+	          }
+	        });
+	        if (changed) scheduleValidate();
+	      } catch (_) {
+	        // ignore autofill failures
+	      }
+	    }
+
+		    function renderDocDetail() {
+		      if (!state.selectedDoc) return;
+		      docDetailCard.classList.remove('hidden');
+		      const info = docDetailCard.querySelector('#docInfo');
+		      const statusSel = docDetailCard.querySelector('#docStatusSelect');
+		      const fieldsWrap = docDetailCard.querySelector('#docFields');
+		      const layoutWrap = document.getElementById('docLayoutWrap');
+		      setLayout(state.layout);
+		      state.fieldMeta = {};
+		      clearValidationUI();
+
+		      statusSel.value = state.selectedDoc.payload.status || 'To Review';
 	      if (docGenerateExportBtn) {
 	        const s = statusSel.value || 'To Review';
 	        docGenerateExportBtn.disabled = (s === 'To Review' || s === 'Hold' || s === 'Exported');
@@ -977,14 +1137,21 @@
 	      if (docReasonSelect) {
 	        docReasonSelect.value = state.selectedDoc.payload.reason || '';
 	      }
-      const toggleReason = () => {
-        if (!docReasonWrap) return;
-        const show = statusSel.value === 'Rejected';
-        docReasonWrap.classList.toggle('hidden', !show);
-        if (!show && docReasonSelect) docReasonSelect.value = '';
-      };
-      statusSel.onchange = toggleReason;
-      toggleReason();
+	      const toggleReason = () => {
+	        if (!docReasonWrap) return;
+	        const show = statusSel.value === 'Rejected';
+	        docReasonWrap.classList.toggle('hidden', !show);
+	        if (!show && docReasonSelect) docReasonSelect.value = '';
+	      };
+	      statusSel.onchange = () => {
+	        toggleReason();
+	        if (docGenerateExportBtn) {
+	          const s = statusSel.value || 'To Review';
+	          docGenerateExportBtn.disabled = (s === 'To Review' || s === 'Hold' || s === 'Exported');
+	        }
+	        scheduleValidate();
+	      };
+	      toggleReason();
       const bucket = state.selectedDoc.source_bucket || (state.selectedDoc.payload && state.selectedDoc.payload.source_bucket) || '';
       const srcKey = state.selectedDoc.source_file || (state.selectedDoc.payload && state.selectedDoc.payload.source_file) || '';
       const tokenParam = state.token ? `&token=${encodeURIComponent(state.token)}` : '';
@@ -1045,43 +1212,58 @@
           dl.appendChild(opt);
         });
       }
-      ordered.forEach((f, idx) => {
-        const div = document.createElement('div');
-        const bbox = f.BoundingBox || f.boundingBox || f.value_box || f.box;
-        const fieldKey = f.key || f.field_name || 'Field ' + idx;
-        const displayKey = fieldAliases[fieldKey] || fieldKey;
-        const conf = normalizeConfidence(f.confidence ?? f.gptConfidence);
-        const color = confidenceColor(conf);
+	      ordered.forEach((f, idx) => {
+	        const div = document.createElement('div');
+	        div.className = 'field-wrap';
+	        div.style.padding = '8px';
+	        div.style.border = '1px solid var(--border)';
+	        div.style.borderRadius = '10px';
+	        div.style.background = 'var(--panel)';
+	        const bbox = f.BoundingBox || f.boundingBox || f.value_box || f.box;
+	        const fieldKey = f.key || f.field_name || 'Field ' + idx;
+	        const displayKey = fieldAliases[fieldKey] || fieldKey;
+	        const conf = normalizeConfidence(f.confidence ?? f.gptConfidence);
+	        const color = confidenceColor(conf);
         const validation = f.validation || {};
         let badge = '';
         if (validation.status === 'match') {
           badge = `<span class="pill green" style="margin-left:6px;">ref</span>`;
         }
-        const requiredBadge = requiredSet.has(lower(fieldKey)) ? `<span class="pill amber" style="margin-left:6px;">required</span>` : '';
-        div.innerHTML = `
-          <label>${displayKey}${badge}${requiredBadge}</label>
-          <input data-field="${fieldKey}" data-left="${bbox && bbox.Left != null ? bbox.Left : ''}" data-top="${bbox && bbox.Top != null ? bbox.Top : ''}" data-width="${bbox && bbox.Width != null ? bbox.Width : ''}" data-height="${bbox && bbox.Height != null ? bbox.Height : ''}" value="${f.value || ''}">
-        `;
-        fieldsWrap.appendChild(div);
-        const inputEl = div.querySelector('input');
-        if (supplierDatalistId && fieldKey.toLowerCase().includes('supplier')) {
-          inputEl.setAttribute('list', supplierDatalistId);
-        }
-        inputEl.style.border = `2px solid ${color}`;
-        inputEl.style.boxShadow = `0 0 0 1px ${color}33`;
-        if (isValidBox(bbox)) {
-          inputEl.addEventListener('focus', () => handleFieldFocus(bbox));
-          inputEl.addEventListener('click', () => handleFieldFocus(bbox));
-        }
-      });
+	        const requiredBadge = requiredSet.has(lower(fieldKey)) ? `<span class="pill amber" style="margin-left:6px;">required</span>` : '';
+	        div.innerHTML = `
+	          <label>${displayKey}${badge}${requiredBadge}</label>
+	          <input data-field="${fieldKey}" data-left="${bbox && bbox.Left != null ? bbox.Left : ''}" data-top="${bbox && bbox.Top != null ? bbox.Top : ''}" data-width="${bbox && bbox.Width != null ? bbox.Width : ''}" data-height="${bbox && bbox.Height != null ? bbox.Height : ''}" value="${f.value || ''}">
+	          <div class="field-error"></div>
+	        `;
+	        fieldsWrap.appendChild(div);
+	        const inputEl = div.querySelector('input');
+	        if (supplierDatalistId && fieldKey.toLowerCase().includes('supplier')) {
+	          inputEl.setAttribute('list', supplierDatalistId);
+	        }
+	        inputEl.dataset.baseBorder = color;
+	        inputEl.dataset.baseShadow = `0 0 0 1px ${color}33`;
+	        inputEl.style.border = `2px solid ${color}`;
+	        inputEl.style.boxShadow = inputEl.dataset.baseShadow;
+	        inputEl.addEventListener('input', () => {
+	          const meta = getFieldMeta(fieldKey);
+	          meta.locked = true;
+	          scheduleValidate();
+	        });
+	        if (isValidBox(bbox)) {
+	          inputEl.addEventListener('focus', () => handleFieldFocus(bbox));
+	          inputEl.addEventListener('click', () => handleFieldFocus(bbox));
+	        }
+	      });
       if (!ordered.length) {
         fieldsWrap.innerHTML = '<div>No normalized_data</div>';
       }
 
-	      const pdfUrl = internalPdf || state.selectedDoc.pdf_url;
-	      renderPdfOverlay(pdfUrl, ordered);
-	      lookupDocExport();
-	    }
+		      const pdfUrl = internalPdf || state.selectedDoc.pdf_url;
+		      renderPdfOverlay(pdfUrl, ordered);
+		      lookupDocExport();
+		      autofillFromCustomerId();
+		      scheduleValidate();
+		    }
 
     function scrollToBoundingBox(box) {
       const container = document.getElementById('pdfContainer');
@@ -1439,10 +1621,18 @@
           docDetailCard.classList.add('hidden');
           alert('Saved. No more documents To Review.');
         }
-      } catch (e) {
-        alert('Save error: ' + e.message);
-      }
-    });
+	      } catch (e) {
+	        try {
+	          const detail = e && e.data && e.data.detail;
+	          if (detail && typeof detail === 'object' && Array.isArray(detail.errors)) {
+	            renderValidationErrors(detail.errors);
+	          } else {
+	            await validateSelectedDoc();
+	          }
+	        } catch (_) {}
+	        alert('Save error: ' + e.message);
+	      }
+	    });
 
     createUserBtn.addEventListener('click', async () => {
       try {
@@ -1602,7 +1792,7 @@
       if (!table) return;
       table.querySelector('tbody').replaceWith(accessSummaryTableBody);
     }
-	    async function refreshAccessSummary() {
+		    async function refreshAccessSummary() {
 	      const statusEl = document.getElementById('accessSummaryStatus');
 	      if (statusEl) statusEl.textContent = 'Loading...';
 	      try {
@@ -1617,39 +1807,107 @@
 	        renderAccessSummary();
 	      } catch (e) {
 	        if (statusEl) statusEl.textContent = 'Error: ' + e.message;
-	      }
-	    }
+		      }
+		    }
 
-	    async function runMonthlyReport() {
-	      if (state.role !== 'admin') return;
-	      const month = (reportMonth && reportMonth.value) ? reportMonth.value : new Date().toISOString().slice(0, 7);
-	      const job = (reportJobPrefix && reportJobPrefix.value || '').trim();
-	      if (reportStatus) reportStatus.textContent = 'Loading...';
-	      if (reportTableBody) reportTableBody.innerHTML = '';
-	      try {
-	        const qs = new URLSearchParams({ month });
-	        if (job) qs.append('job', job);
-	        const data = await api('/api/reports/monthly?' + qs.toString(), { method: 'GET' });
-	        const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
-	        if (reportTableBody) {
-	          jobs.forEach(r => {
-	            const by = r.by_status || {};
-	            const tr = document.createElement('tr');
-	            tr.innerHTML = `<td>${r.job || ''}</td><td>${r.documents || 0}</td><td>${r.pages || 0}</td><td>${by['To Review'] || 0}</td><td>${by['Approved'] || 0}</td><td>${by['Rejected'] || 0}</td><td>${by['Hold'] || 0}</td><td>${by['Exported'] || 0}</td>`;
-	            reportTableBody.appendChild(tr);
-	          });
-	        }
-	        const totals = data && data.totals ? data.totals : null;
-	        if (reportStatus) {
-	          const td = totals ? totals.documents : 0;
-	          const tp = totals ? totals.pages : 0;
-	          reportStatus.textContent = `Month ${month}: ${td} documents, ${tp} pages`;
-	        }
-	      } catch (e) {
-	        if (reportStatus) reportStatus.textContent = 'Error: ' + e.message;
-	      }
-	    }
-	    if (runReportBtn) runReportBtn.addEventListener('click', runMonthlyReport);
+		    async function refreshAutomation() {
+		      if (state.role !== 'admin') return;
+		      if (automationStatus) automationStatus.textContent = 'Loading...';
+		      try {
+		        const cfg = await api('/api/automation', { method: 'GET' });
+		        const enabled = !!(cfg && cfg.enabled);
+		        if (automationEnabled) automationEnabled.value = enabled ? 'true' : 'false';
+		        const updated = (cfg && cfg.updated_at) ? ` | updated: ${cfg.updated_at}` : '';
+		        const by = (cfg && cfg.updated_by) ? ` | by: ${cfg.updated_by}` : '';
+		        if (automationStatus) automationStatus.textContent = `Automation ${enabled ? 'ENABLED' : 'DISABLED'}${updated}${by}`;
+		      } catch (e) {
+		        if (automationStatus) automationStatus.textContent = 'Error: ' + e.message;
+		      }
+		    }
+		    async function saveAutomation() {
+		      if (state.role !== 'admin') return;
+		      try {
+		        if (automationStatus) automationStatus.textContent = 'Saving...';
+		        const enabled = (automationEnabled && automationEnabled.value === 'true');
+		        await api('/admin/automation', { method: 'POST', body: JSON.stringify({ enabled }) });
+		        await refreshAutomation();
+		      } catch (e) {
+		        if (automationStatus) automationStatus.textContent = 'Error: ' + e.message;
+		      }
+		    }
+		    if (automationRefreshBtn) automationRefreshBtn.addEventListener('click', refreshAutomation);
+		    if (automationSaveBtn) automationSaveBtn.addEventListener('click', saveAutomation);
+
+		    async function runMonthlyReport() {
+		      if (state.role !== 'admin') return;
+		      const month = (reportMonth && reportMonth.value) ? reportMonth.value : new Date().toISOString().slice(0, 7);
+		      const job = (reportJobPrefix && reportJobPrefix.value || '').trim();
+		      if (reportStatus) reportStatus.textContent = 'Loading...';
+		      if (reportTableBody) reportTableBody.innerHTML = '';
+		      try {
+		        const qs = new URLSearchParams({ month });
+		        if (job) qs.append('job', job);
+		        const data = await api('/api/reports/monthly?' + qs.toString(), { method: 'GET' });
+		        const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
+		        const totals = data && data.totals ? data.totals : null;
+		        state.reportData = { month: (data && data.month) ? data.month : month, jobs, totals };
+		        if (reportTableBody) {
+		          jobs.forEach(r => {
+		            const by = r.by_status || {};
+		            const tr = document.createElement('tr');
+		            tr.innerHTML = `<td>${r.job || ''}</td><td>${r.documents || 0}</td><td>${r.pages || 0}</td><td>${by['To Review'] || 0}</td><td>${by['Approved'] || 0}</td><td>${by['Rejected'] || 0}</td><td>${by['Hold'] || 0}</td><td>${by['Exported'] || 0}</td>`;
+		            reportTableBody.appendChild(tr);
+		          });
+		        }
+		        if (reportStatus) {
+		          const td = totals ? totals.documents : 0;
+		          const tp = totals ? totals.pages : 0;
+		          reportStatus.textContent = `Month ${month}: ${td} documents, ${tp} pages`;
+		        }
+		      } catch (e) {
+		        state.reportData = null;
+		        if (reportStatus) reportStatus.textContent = 'Error: ' + e.message;
+		      }
+		    }
+		    if (runReportBtn) runReportBtn.addEventListener('click', runMonthlyReport);
+
+		    function downloadMonthlyReportCsv() {
+		      if (!state.reportData || !Array.isArray(state.reportData.jobs)) {
+		        alert('Run report first');
+		        return;
+		      }
+		      const month = state.reportData.month || '';
+		      const rows = state.reportData.jobs || [];
+		      const header = ['month','job','customer','job_type','documents','pages','to_review','approved','rejected','hold','exported'];
+		      const lines = [header.join(',')];
+		      rows.forEach(r => {
+		        const by = r.by_status || {};
+		        const vals = [
+		          month,
+		          r.job || '',
+		          r.customer || '',
+		          r.job_type || '',
+		          String(r.documents || 0),
+		          String(r.pages || 0),
+		          String(by['To Review'] || 0),
+		          String(by['Approved'] || 0),
+		          String(by['Rejected'] || 0),
+		          String(by['Hold'] || 0),
+		          String(by['Exported'] || 0),
+		        ].map(v => `"${String(v).replaceAll('"','""')}"`);
+		        lines.push(vals.join(','));
+		      });
+		      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+		      const url = URL.createObjectURL(blob);
+		      const a = document.createElement('a');
+		      a.href = url;
+		      a.download = `monthly_report_${month || 'unknown'}.csv`;
+		      document.body.appendChild(a);
+		      a.click();
+		      a.remove();
+		      URL.revokeObjectURL(url);
+		    }
+		    if (downloadReportCsvBtn) downloadReportCsvBtn.addEventListener('click', downloadMonthlyReportCsv);
 
 	    function initFromStorage() {
 	      const savedTheme = localStorage.getItem('theme') || 'dark';
@@ -1694,13 +1952,14 @@
     }
     renderAccessSummary();
 
-	    async function downloadExport(status) {
-	      if (!state.selectedJob) { alert('Select a job first'); return; }
-	      try {
-	        const res = await api('/api/export/batch/s3', {
-	          method: 'POST',
-	          body: JSON.stringify({ job: state.selectedJob.folder_prefix, status, upload_ftp: false, mark_exported: true })
-	        });
+		    async function downloadExport(status) {
+		      if (!state.selectedJob) { alert('Select a job first'); return; }
+		      try {
+		        const markExported = (status === 'Approved' || status === 'Rejected');
+		        const res = await api('/api/export/batch/s3', {
+		          method: 'POST',
+		          body: JSON.stringify({ job: state.selectedJob.folder_prefix, status, upload_ftp: false, mark_exported: markExported })
+		        });
 	        const url = res.url;
 	        if (!url) throw new Error('Missing export URL');
 	        const a = document.createElement('a');
@@ -1714,40 +1973,49 @@
 	        alert('Export failed: ' + e.message);
 	      }
 	    }
-    const exportApprovedBtn = document.getElementById('exportApprovedBtn');
-    const exportRejectedBtn = document.getElementById('exportRejectedBtn');
-    if (exportApprovedBtn) exportApprovedBtn.addEventListener('click', () => downloadExport('Approved'));
-    if (exportRejectedBtn) exportRejectedBtn.addEventListener('click', () => downloadExport('Rejected'));
+	    const exportApprovedBtn = document.getElementById('exportApprovedBtn');
+	    const exportRejectedBtn = document.getElementById('exportRejectedBtn');
+	    const exportHoldBtn = document.getElementById('exportHoldBtn');
+	    if (exportApprovedBtn) exportApprovedBtn.addEventListener('click', () => downloadExport('Approved'));
+	    if (exportRejectedBtn) exportRejectedBtn.addEventListener('click', () => downloadExport('Rejected'));
+	    if (exportHoldBtn) exportHoldBtn.addEventListener('click', () => downloadExport('Hold'));
 
-    async function runCustomerLookup() {
-      if (!customerLookupInput || !customerLookupInput.value.trim()) return;
-      try {
-        if (customerLookupStatus) customerLookupStatus.textContent = 'Searching...';
-        const cid = customerLookupInput.value.trim();
-        const qs = new URLSearchParams({ customer_id: cid });
-        const res = await api('/api/customers/lookup?' + qs.toString());
-        if (!res.found || !res.data || !res.data.length) {
-          if (customerLookupStatus) customerLookupStatus.textContent = `Not found for ${cid}`;
-          return;
-        }
-        const match = res.data[0];
-        if (customerLookupStatus) customerLookupStatus.textContent = `Found ${match.name || ''} (${match.customer_id})`;
-        // populate fields
-        const inputs = docDetailCard.querySelectorAll('input[data-field]');
-        inputs.forEach(inp => {
-          const key = (inp.dataset.field || '').toLowerCase();
-          if (key.includes('supplier') || key.includes('creditor')) {
-            if (match.name) inp.value = match.name;
-            if (key.includes('code') && match.customer_id) inp.value = match.customer_id;
-          }
-          if (key.includes('gst') && match.gst_abn) {
-            inp.value = match.gst_abn;
-          }
-        });
-      } catch (e) {
-        if (customerLookupStatus) customerLookupStatus.textContent = 'Lookup error: ' + e.message;
-      }
-    }
+	    async function runCustomerLookup() {
+	      if (!customerLookupInput || !customerLookupInput.value.trim()) return;
+	      try {
+	        if (customerLookupStatus) customerLookupStatus.textContent = 'Searching...';
+	        const cid = customerLookupInput.value.trim();
+	        const qs = new URLSearchParams({ customer_id: cid });
+	        const res = await api('/api/customers/lookup?' + qs.toString());
+	        if (!res.found || res.status !== 'match' || !res.selected) {
+	          if (customerLookupStatus) customerLookupStatus.textContent = `Not found for ${cid}`;
+	          if (res && res.status === 'ambiguous') {
+	            const c = res.match_count || (res.data ? res.data.length : 0);
+	            if (customerLookupStatus) customerLookupStatus.textContent = `Ambiguous for ${cid} (${c} matches)`;
+	          }
+	          return;
+	        }
+	        const match = res.selected;
+	        if (customerLookupStatus) customerLookupStatus.textContent = `Found ${match.name || ''} (${match.customer_id})`;
+	        // populate fields
+	        const inputs = docDetailCard.querySelectorAll('input[data-field]');
+	        inputs.forEach(inp => {
+	          const key = (inp.dataset.field || '').toLowerCase();
+	          const meta = getFieldMeta(inp.dataset.field || '');
+	          if (meta.locked) return;
+	          if (key.includes('supplier') || key.includes('creditor')) {
+	            if (match.name) inp.value = match.name;
+	            if (key.includes('code') && match.customer_id) inp.value = match.customer_id;
+	          }
+	          if (key.includes('gst') && match.gst_abn) {
+	            inp.value = match.gst_abn;
+	          }
+	        });
+	        scheduleValidate();
+	      } catch (e) {
+	        if (customerLookupStatus) customerLookupStatus.textContent = 'Lookup error: ' + e.message;
+	      }
+	    }
     if (customerLookupBtn) customerLookupBtn.addEventListener('click', runCustomerLookup);
     if (customerLookupInput) {
       customerLookupInput.addEventListener('keypress', (e) => {
