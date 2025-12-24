@@ -2,7 +2,8 @@ import json
 import os
 import re
 import copy
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -31,6 +32,7 @@ import jwt
 import csv
 import io
 import zipfile
+from ftplib import FTP, FTP_TLS
 from fastapi import UploadFile, File
 
 
@@ -39,6 +41,16 @@ BRONZE_BUCKET = os.getenv("BRONZE_BUCKET", "bronze-bucket-icvt")
 SILVER_BUCKET = os.getenv("SILVER_BUCKET", "silver-bucket-icvt")
 STATIC_DIR = Path(__file__).parent / "static"
 REFERENCE_DIR = Path(__file__).parent / "reference"
+REFERENCE_BUCKET = os.getenv("REFERENCE_BUCKET") or SILVER_BUCKET
+REFERENCE_PREFIX = os.getenv("REFERENCE_PREFIX", "portal/reference").strip("/")
+JOB_CONFIG_BUCKET = os.getenv("JOB_CONFIG_BUCKET") or SILVER_BUCKET
+JOB_CONFIG_PREFIX = os.getenv("JOB_CONFIG_PREFIX", "portal/config/jobs").strip("/")
+JOB_CONFIG_CACHE_TTL_S = int(os.getenv("JOB_CONFIG_CACHE_TTL_S", "30"))
+EXPORT_FTP_HOST = os.getenv("EXPORT_FTP_HOST")
+EXPORT_FTP_USER = os.getenv("EXPORT_FTP_USER")
+EXPORT_FTP_PASSWORD = os.getenv("EXPORT_FTP_PASSWORD")
+EXPORT_FTP_DIR = os.getenv("EXPORT_FTP_DIR", "").strip("/")
+EXPORT_FTP_TLS = os.getenv("EXPORT_FTP_TLS", "0").lower() in ("1", "true", "yes")
 DB_URL = os.getenv("DB_URL", f"sqlite:///{Path(__file__).parent / 'portal.db'}")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-secret")
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
@@ -53,17 +65,13 @@ pwd_context = CryptContext(
     schemes=["pbkdf2_sha256"],
     deprecated="auto",
 )
-# Load reference data at startup
-try:
-    load_reference_tables()
-except Exception:
-    pass
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
 DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 TS_PREFIX_RE = re.compile(r"^(\d{10,13})")
 SAFE_FOLDER_RE = re.compile(r"^[A-Za-z0-9._/+\\-]*$")
 REFERENCE_DATA = {
@@ -72,6 +80,8 @@ REFERENCE_DATA = {
     "invoices": [],
     "indexes": {},
 }
+
+_JOB_CONFIG_CACHE = {}  # job_prefix -> {"ts": float, "config": dict}
 
 
 def sanitize_folder(folder: Optional[str]) -> str:
@@ -131,9 +141,16 @@ def load_reference_tables():
     REFERENCE_DATA["suppliers"].clear()
     REFERENCE_DATA["po"].clear()
     REFERENCE_DATA["invoices"].clear()
-    REFERENCE_DATA["indexes"] = {"by_id": {}, "by_number": {}, "by_name": set()}
+    REFERENCE_DATA["indexes"] = {"by_id": {}, "by_number": {}, "by_name": set(), "suppliers_by_name": {}, "po_by_number": {}}
 
-    def load_csv(path: Path):
+    def load_csv_filelike(file_obj):
+        rows = []
+        reader = csv.DictReader((line.decode("utf-8", errors="ignore") for line in file_obj.iter_lines()))
+        for row in reader:
+            rows.append({k.strip(): (v or "").strip() for k, v in row.items()})
+        return rows
+
+    def load_csv_local(path: Path):
         if not path.exists():
             return []
         rows = []
@@ -143,8 +160,29 @@ def load_reference_tables():
                 rows.append({k.strip(): (v or "").strip() for k, v in row.items()})
         return rows
 
-    jar_sup = REFERENCE_DIR / "JAR Supplier Details.csv"
-    if jar_sup.exists():
+    def load_csv_named(filename: str):
+        # Prefer S3 (so it can be updated without redeploy); fallback to local repo file.
+        if REFERENCE_BUCKET and REFERENCE_PREFIX:
+            s3_key = f"{REFERENCE_PREFIX}/{filename}"
+        elif REFERENCE_BUCKET:
+            s3_key = filename
+        else:
+            s3_key = None
+
+        if REFERENCE_BUCKET and s3_key:
+            try:
+                obj = S3.get_object(Bucket=REFERENCE_BUCKET, Key=s3_key)
+                body = obj["Body"]
+                return load_csv_filelike(body)
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+                    raise
+
+        return load_csv_local(REFERENCE_DIR / filename)
+
+    jar_sup_name = "JAR Supplier Details.csv"
+    jar_sup = load_csv_named(jar_sup_name)
+    if jar_sup:
         REFERENCE_DATA["suppliers"].extend(
             [
                 {
@@ -154,12 +192,13 @@ def load_reference_tables():
                     "gst_abn": "",
                     "currency": "",
                 }
-                for r in load_csv(jar_sup)
+                for r in jar_sup
             ]
         )
 
-    nzme_sup = REFERENCE_DIR / "NZME JDE Supplier Details.csv"
-    if nzme_sup.exists():
+    nzme_sup_name = "NZME JDE Supplier Details.csv"
+    nzme_sup = load_csv_named(nzme_sup_name)
+    if nzme_sup:
         REFERENCE_DATA["suppliers"].extend(
             [
                 {
@@ -169,17 +208,19 @@ def load_reference_tables():
                     "gst_abn": r.get("GST_ABN", ""),
                     "currency": r.get("Currency", ""),
                 }
-                for r in load_csv(nzme_sup)
+                for r in nzme_sup
             ]
         )
 
-    jar_po = REFERENCE_DIR / "JAR Database Table PO Details.csv"
-    if jar_po.exists():
-        REFERENCE_DATA["po"].extend(load_csv(jar_po))
+    jar_po_name = "JAR Database Table PO Details.csv"
+    jar_po = load_csv_named(jar_po_name)
+    if jar_po:
+        REFERENCE_DATA["po"].extend(jar_po)
 
-    jar_inv = REFERENCE_DIR / "JAR Invoice Details.csv"
-    if jar_inv.exists():
-        REFERENCE_DATA["invoices"].extend(load_csv(jar_inv))
+    jar_inv_name = "JAR Invoice Details.csv"
+    jar_inv = load_csv_named(jar_inv_name)
+    if jar_inv:
+        REFERENCE_DATA["invoices"].extend(jar_inv)
 
     # build indexes
     for sup in REFERENCE_DATA["suppliers"]:
@@ -188,7 +229,15 @@ def load_reference_tables():
             REFERENCE_DATA["indexes"].setdefault("by_id", {}).setdefault(cid.upper(), []).append(sup)
         name = (sup.get("name") or "").strip()
         if name:
-            REFERENCE_DATA["indexes"]["by_name"].add(name.upper())
+            name_up = name.upper()
+            REFERENCE_DATA["indexes"]["by_name"].add(name_up)
+            REFERENCE_DATA["indexes"].setdefault("suppliers_by_name", {}).setdefault(name_up, []).append(sup)
+
+    for po in REFERENCE_DATA["po"]:
+        po_no = (po.get("PO No") or po.get("PO") or "").strip()
+        if not po_no:
+            continue
+        REFERENCE_DATA["indexes"].setdefault("po_by_number", {}).setdefault(po_no.upper(), []).append(po)
     for inv in REFERENCE_DATA["invoices"]:
         cid = (inv.get("Cre Account") or "").strip()
         inv_no = (inv.get("Invoice No") or "").strip()
@@ -253,31 +302,18 @@ def parse_job_doc_from_key(key: str):
     return job_prefix, doc_id
 
 
-def stream_csv_zip(rows: List[dict]) -> StreamingResponse:
+def stream_csv_zip(job_prefix: str, rows: List[dict]) -> StreamingResponse:
     output = io.BytesIO()
-    csv_buffer = io.StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(["status", "name", "created_at", "invoice_number", "invoice_date", "total_amount", "supplier", "key", "page_count"])
-    for r in rows:
-        writer.writerow([
-            r.get("status", ""),
-            r.get("name", "") or r.get("doc_id", ""),
-            r.get("created_at", ""),
-            r.get("invoice_number", ""),
-            r.get("invoice_date", ""),
-            r.get("total_amount", ""),
-            r.get("supplier", ""),
-            r.get("key", ""),
-            r.get("page_count", ""),
-        ])
-    csv_data = csv_buffer.getvalue()
+    export_csv = build_export_csv_bytes(job_prefix, rows)
+    meta_csv = build_meta_csv_bytes(rows)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("export.csv", csv_data)
+        zf.writestr("export.csv", export_csv)
+        zf.writestr("meta.csv", meta_csv)
     output.seek(0)
     return StreamingResponse(
         output,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="export.zip"'},
+        headers={"Content-Disposition": f'attachment; filename="export_{job_prefix}.zip"'},
     )
 
 
@@ -345,7 +381,371 @@ def canonical_status(val: Optional[str]) -> str:
         return "Rejected"
     if s == "exported":
         return "Exported"
+    if s in ("hold", "on hold", "on-hold", "on_hold", "h"):
+        return "Hold"
     return "To Review"
+
+
+def parse_payload_datetime(val) -> Optional[datetime]:
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        dt = val
+        if dt.tzinfo:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    raw = str(val).strip()
+    if not raw:
+        return None
+    # Support ISO formats and "Z" suffix.
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+def job_config_s3_key(job_prefix: str) -> str:
+    base = JOB_CONFIG_PREFIX.strip("/")
+    job_prefix = job_prefix.strip("/")
+    if base:
+        return f"{base}/{job_prefix}.json"
+    return f"{job_prefix}.json"
+
+
+def get_job_config(job_prefix: str) -> dict:
+    job_prefix = sanitize_folder(job_prefix)
+    if not job_prefix:
+        return {}
+
+    cached = _JOB_CONFIG_CACHE.get(job_prefix)
+    now = time.time()
+    if cached and (now - cached.get("ts", 0) < JOB_CONFIG_CACHE_TTL_S):
+        return cached.get("config") or {}
+
+    key = job_config_s3_key(job_prefix)
+    try:
+        obj = S3.get_object(Bucket=JOB_CONFIG_BUCKET, Key=key)
+        data = json.loads(obj["Body"].read())
+        if not isinstance(data, dict):
+            data = {}
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            data = {}
+        else:
+            raise
+    _JOB_CONFIG_CACHE[job_prefix] = {"ts": now, "config": data}
+    return data
+
+
+def save_job_config(job_prefix: str, config: dict):
+    job_prefix = sanitize_folder(job_prefix)
+    if not job_prefix:
+        raise HTTPException(status_code=400, detail="job is required")
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=400, detail="config must be an object")
+    key = job_config_s3_key(job_prefix)
+    S3.put_object(
+        Bucket=JOB_CONFIG_BUCKET,
+        Key=key,
+        Body=json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+    _JOB_CONFIG_CACHE.pop(job_prefix, None)
+
+
+def _normalized_field_map(payload: dict) -> dict:
+    out = {}
+    for f in payload.get("normalized_data") or []:
+        k = (f.get("key") or f.get("field_name") or "").strip()
+        if not k:
+            continue
+        out[k.lower()] = f
+    return out
+
+
+def _try_parse_date(val: str) -> Optional[str]:
+    raw = (val or "").strip()
+    if not raw:
+        return None
+    # Common invoice date formats (NZ/AU + ISO)
+    candidates = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in candidates:
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return None
+
+
+def _try_parse_amount(val: str) -> Optional[float]:
+    raw = (val or "").strip()
+    if not raw:
+        return None
+    cleaned = re.sub(r"[^0-9.,-]+", "", raw)
+    if cleaned.count(",") > 0 and cleaned.count(".") == 0:
+        # "1,23" -> "1.23"
+        cleaned = cleaned.replace(",", ".")
+    cleaned = cleaned.replace(",", "")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def validate_document(payload: dict, job_prefix: str) -> List[dict]:
+    cfg = get_job_config(job_prefix) or {}
+    fields = _normalized_field_map(payload)
+
+    required_fields = cfg.get("required_fields")
+    if not isinstance(required_fields, list):
+        if job_prefix.upper().startswith("JAR"):
+            required_fields = ["Invoice Number", "Invoice Date", "Total Amount", "Supplier/Vendor Name"]
+        else:
+            required_fields = ["Invoice Number", "Invoice Date"]
+
+    date_fields = cfg.get("date_fields")
+    if not isinstance(date_fields, list):
+        date_fields = ["Invoice Date"]
+
+    amount_fields = cfg.get("amount_fields")
+    if not isinstance(amount_fields, list):
+        amount_fields = ["Total Amount", "GST Amount", "Invoice Total"]
+
+    errors: List[dict] = []
+
+    for name in required_fields:
+        f = fields.get(str(name).strip().lower())
+        val = (f or {}).get("value")
+        if not (val or "").strip():
+            errors.append({"field": name, "error": "required"})
+
+    for name in date_fields:
+        f = fields.get(str(name).strip().lower())
+        val = (f or {}).get("value")
+        if (val or "").strip() and not _try_parse_date(val):
+            errors.append({"field": name, "error": "invalid_date"})
+
+    for name in amount_fields:
+        f = fields.get(str(name).strip().lower())
+        val = (f or {}).get("value")
+        if (val or "").strip() and _try_parse_amount(val) is None:
+            errors.append({"field": name, "error": "invalid_amount"})
+
+    return errors
+
+
+def _norm_value(payload: dict, *names: str) -> str:
+    fields = _normalized_field_map(payload)
+    for name in names:
+        k = (name or "").strip().lower()
+        if not k:
+            continue
+        val = (fields.get(k) or {}).get("value")
+        if (val or "").strip():
+            return str(val).strip()
+    return ""
+
+
+def _jar_creditor_from_reference(payload: dict) -> tuple[str, str]:
+    po = _norm_value(payload, "PO Number", "PO No", "PO")
+    if po:
+        rows = REFERENCE_DATA["indexes"].get("po_by_number", {}).get(po.upper()) or []
+        if rows:
+            return (rows[0].get("Cre Account") or "").strip(), (rows[0].get("Cre Name") or "").strip()
+
+    name = _norm_value(payload, "Supplier/Vendor Name", "Creditor Name", "Supplier", "Vendor")
+    if name:
+        rows = REFERENCE_DATA["indexes"].get("suppliers_by_name", {}).get(name.upper()) or []
+        if rows:
+            return (rows[0].get("customer_id") or "").strip(), (rows[0].get("name") or "").strip()
+
+    return "", ""
+
+
+def _export_schema_from_config(job_prefix: str) -> Optional[List[dict]]:
+    cfg = get_job_config(job_prefix) or {}
+    schema = cfg.get("export_schema") or cfg.get("export", {}).get("schema")
+    return schema if isinstance(schema, list) else None
+
+
+def _build_csv_from_schema(schema: List[dict], payloads: List[dict]) -> bytes:
+    # schema: [{column, field|source|value, type?}] ; payloads: list of document payload dicts
+    output = io.StringIO()
+    writer = csv.writer(output)
+    cols = [str(c.get("column") or "").strip() for c in schema]
+    writer.writerow(cols)
+
+    for p in payloads:
+        row = []
+        for c in schema:
+            val = ""
+            if "value" in c:
+                val = c.get("value")
+            elif c.get("source"):
+                val = p.get(str(c.get("source")))
+            elif c.get("field"):
+                val = _norm_value(p, str(c.get("field")))
+            t = str(c.get("type") or "").strip().lower()
+            if t == "date":
+                parsed = _try_parse_date(str(val or ""))
+                val = parsed or (val or "")
+            elif t == "amount":
+                parsed = _try_parse_amount(str(val or ""))
+                val = "" if parsed is None else f"{parsed:.2f}"
+            row.append(val if val is not None else "")
+        writer.writerow(row)
+    return output.getvalue().encode("utf-8")
+
+
+def build_export_csv_bytes(job_prefix: str, payloads: List[dict]) -> bytes:
+    schema = _export_schema_from_config(job_prefix)
+    if schema:
+        return _build_csv_from_schema(schema, payloads)
+
+    # Defaults per job type (fallbacks until job config is defined).
+    if job_prefix.upper().startswith("JAR"):
+        header = ["Cre Account", "Cre Name", "PO No", "Invoice No", "Invoice total", "Sub Total", "Invoice Date", "Uploaded Date"]
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(header)
+        for p in payloads:
+            cre_account, cre_name = _jar_creditor_from_reference(p)
+            po_no = _norm_value(p, "PO Number", "PO No", "PO")
+            inv_no = _norm_value(p, "Invoice Number", "Invoice No")
+            inv_total = _norm_value(p, "Invoice Total", "Total Amount", "Invoice total")
+            inv_date = _norm_value(p, "Invoice Date")
+            inv_date = _try_parse_date(inv_date) or inv_date
+            uploaded = p.get("processed_at") or p.get("updated_at") or ""
+            if isinstance(uploaded, datetime):
+                uploaded = uploaded.isoformat()
+            uploaded = str(uploaded or "")
+            writer.writerow([cre_account, cre_name, po_no, inv_no, inv_total, "", inv_date, uploaded])
+        return output.getvalue().encode("utf-8")
+
+    # Generic CSV for non-JAR jobs
+    header = ["status", "reason", "created_at", "invoice_number", "invoice_date", "total_amount", "gst_amount", "supplier", "po_number", "account_number", "key", "page_count"]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(header)
+    for p in payloads:
+        fields_map = _normalized_field_map(p)
+
+        def val(name: str):
+            return (fields_map.get(name.lower()) or {}).get("value") or ""
+
+        writer.writerow([
+            canonical_status(p.get("status")),
+            p.get("reason") or "",
+            p.get("processed_at") or "",
+            val("Invoice Number"),
+            _try_parse_date(val("Invoice Date")) or val("Invoice Date"),
+            val("Total Amount") or val("Invoice Total"),
+            val("GST Amount"),
+            val("Supplier/Vendor Name") or val("Creditor Name"),
+            val("PO Number"),
+            val("Account Number"),
+            p.get("key") or "",
+            p.get("page_count") or p.get("pages") or "",
+        ])
+    return output.getvalue().encode("utf-8")
+
+
+def build_kv_csv_bytes(payload: dict) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["field", "value", "confidence"])
+    for f in payload.get("normalized_data") or []:
+        writer.writerow([f.get("key") or f.get("field_name") or "", f.get("value") or "", f.get("confidence") or f.get("gptConfidence") or ""])
+    return output.getvalue().encode("utf-8")
+
+
+def build_meta_csv_bytes(payloads: List[dict]) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["key", "status", "reason", "processed_at", "updated_at", "export_key"])
+    for p in payloads:
+        writer.writerow([
+            p.get("key") or "",
+            canonical_status(p.get("status")),
+            p.get("reason") or "",
+            p.get("processed_at") or "",
+            p.get("updated_at") or "",
+            p.get("export_key") or "",
+        ])
+    return output.getvalue().encode("utf-8")
+
+
+def build_export_zip_bytes(job_prefix: str, payload: dict, source_filename: str, source_bytes: bytes) -> bytes:
+    cfg = get_job_config(job_prefix) or {}
+    extra = cfg.get("extra_exports") if isinstance(cfg.get("extra_exports"), list) else []
+
+    export_csv = build_export_csv_bytes(job_prefix, [payload])
+    kv_csv = build_kv_csv_bytes(payload)
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(source_filename, source_bytes)
+        zf.writestr("export.csv", export_csv)
+        zf.writestr("kv.csv", kv_csv)
+        for item in extra:
+            if not isinstance(item, dict):
+                continue
+            filename = (item.get("filename") or "").strip() or "extra.csv"
+            schema = item.get("schema")
+            if isinstance(schema, list):
+                zf.writestr(filename, _build_csv_from_schema(schema, [payload]))
+    output.seek(0)
+    return output.getvalue()
+
+
+def _ftp_upload_bytes(remote_path: str, data: bytes):
+    if not (EXPORT_FTP_HOST and EXPORT_FTP_USER and EXPORT_FTP_PASSWORD):
+        return
+    remote_path = (remote_path or "").lstrip("/")
+    parts = [p for p in remote_path.split("/") if p]
+    if not parts:
+        raise ValueError("remote_path required")
+    filename = parts[-1]
+    dirs = parts[:-1]
+
+    ftp = FTP_TLS(EXPORT_FTP_HOST) if EXPORT_FTP_TLS else FTP(EXPORT_FTP_HOST)
+    ftp.login(EXPORT_FTP_USER, EXPORT_FTP_PASSWORD)
+    if EXPORT_FTP_TLS and isinstance(ftp, FTP_TLS):
+        ftp.prot_p()
+
+    def ensure_dir(path: str):
+        if not path:
+            return
+        try:
+            ftp.cwd(path)
+        except Exception:
+            ftp.mkd(path)
+            ftp.cwd(path)
+
+    if EXPORT_FTP_DIR:
+        ensure_dir(EXPORT_FTP_DIR)
+    for d in dirs:
+        ensure_dir(d)
+
+    bio = io.BytesIO(data)
+    ftp.storbinary(f"STOR {filename}", bio)
+    try:
+        ftp.quit()
+    except Exception:
+        ftp.close()
 
 
 def apply_reference_validation(normalized: List[dict]) -> List[dict]:
@@ -466,6 +866,24 @@ class AccessBulk(BaseModel):
     user_id: int
     folders: List[str]
 
+class JobConfigBody(BaseModel):
+    job: str
+    config: dict
+
+
+class PresencePing(BaseModel):
+    folder_prefix: str
+
+class ExportGenerateBody(BaseModel):
+    key: str
+    upload_ftp: bool = False
+
+class BatchExportS3Body(BaseModel):
+    job: str
+    status: Optional[str] = None
+    upload_ftp: bool = False
+    mark_exported: bool = True
+
 
 class NormalizedUpdate(BaseModel):
     field_name: str
@@ -474,7 +892,7 @@ class NormalizedUpdate(BaseModel):
 
 class DocumentUpdate(BaseModel):
     key: str = Field(..., description="S3 key under textract-results/")
-    status: Optional[str] = Field(None, description="Approved/Rejected/To Review/Exported")
+    status: Optional[str] = Field(None, description="Approved/Rejected/Hold/To Review/Exported")
     fields: Optional[List[NormalizedUpdate]] = Field(None, description="Fields from normalized_data to update")
     reason: Optional[str] = Field(None, description="Optional rejection reason")
 
@@ -508,12 +926,22 @@ class UserAccess(Base):
     user = relationship("User")
 
 
+class UserPresence(Base):
+    __tablename__ = "user_presence"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    folder_prefix = Column(String, nullable=False, index=True)
+    last_seen = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    user = relationship("User")
+
+
 def seed_admin(db: Session):
     admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
     admin_password = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
     reset_flag = os.getenv("ADMIN_RESET", "0") in ("1", "true", "True")
 
-    user = db.query(User).filter(User.email == admin_email).first()
+    admin_email = normalize_email(admin_email)
+    user = db.query(User).filter(func.lower(User.email) == admin_email).first()
     if user:
         if reset_flag:
             user.password_hash = hash_password(admin_password)
@@ -545,6 +973,9 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed: str) -> bool:
     return pwd_context.verify(password, hashed)
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
 
 
 def create_token(user: User) -> str:
@@ -625,7 +1056,7 @@ def fetch_documents_for_export(job: str, status: Optional[str], limit: int = 100
     return items
 
 
-app = FastAPI(title="Upload & Textract Viewer")
+app = FastAPI(title="PIQNIC Orbit")
 origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -641,6 +1072,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 def startup_event():
     init_db()
+    try:
+        load_reference_tables()
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -655,7 +1090,8 @@ def healthz():
 
 @app.post("/auth/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email).first()
+    email = normalize_email(body.email)
+    user = db.query(User).filter(func.lower(User.email) == email).first()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"token": create_token(user), "role": user.role, "email": user.email}
@@ -666,11 +1102,36 @@ def me(user: User = Depends(get_current_user)):
     return {"email": user.email, "role": user.role, "id": user.id}
 
 
+@app.post("/api/presence")
+def presence_ping(
+    body: PresencePing,
+    user: User = Depends(require_roles("admin", "verifier", "viewer")),
+    db: Session = Depends(get_db),
+):
+    folder = sanitize_folder(body.folder_prefix)
+    ensure_folder_allowed(user, folder, db)
+    now = datetime.utcnow()
+    row = (
+        db.query(UserPresence)
+        .filter(UserPresence.user_id == user.id)
+        .filter(UserPresence.folder_prefix == folder)
+        .first()
+    )
+    if row:
+        row.last_seen = now
+    else:
+        row = UserPresence(user_id=user.id, folder_prefix=folder, last_seen=now)
+    db.add(row)
+    db.commit()
+    return {"status": "ok", "folder_prefix": folder, "last_seen": now.isoformat()}
+
+
 @app.post("/admin/users")
 def create_user(body: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    if db.query(User).filter(User.email == body.email).first():
+    email = normalize_email(body.email)
+    if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(status_code=400, detail="User already exists")
-    user = User(email=body.email, password_hash=hash_password(body.password), role=body.role)
+    user = User(email=email, password_hash=hash_password(body.password), role=body.role)
     db.add(user)
     db.commit()
     return {"id": user.id, "email": user.email, "role": user.role}
@@ -786,8 +1247,8 @@ def list_jobs(db: Session = Depends(get_db), user: User = Depends(require_roles(
     prefixes = [j.folder_prefix for j in jobs]
     pending_counts = list_pending_counts(prefixes) if prefixes else {}
 
-    # build map: folder_prefix -> list of verifier emails
-    verifier_map = {}
+    # build map: folder_prefix -> list of assigned verifier emails (role=verifier + access)
+    verifier_map: dict[str, list[str]] = {}
     if prefixes:
         access_rows = (
             db.query(UserAccess, User)
@@ -798,6 +1259,21 @@ def list_jobs(db: Session = Depends(get_db), user: User = Depends(require_roles(
         )
         for access, usr in access_rows:
             verifier_map.setdefault(access.folder_prefix, []).append(usr.email)
+
+    # active verifiers are those who pinged presence recently
+    active_map: dict[str, list[str]] = {}
+    cutoff = datetime.utcnow() - timedelta(minutes=int(os.getenv("PRESENCE_ACTIVE_MINUTES", "5")))
+    if prefixes:
+        pres_rows = (
+            db.query(UserPresence, User)
+            .join(User, UserPresence.user_id == User.id)
+            .filter(UserPresence.folder_prefix.in_(prefixes))
+            .filter(UserPresence.last_seen >= cutoff)
+            .filter(User.role == "verifier")
+            .all()
+        )
+        for pres, usr in pres_rows:
+            active_map.setdefault(pres.folder_prefix, []).append(usr.email)
 
     visible = []
     for j in jobs:
@@ -814,7 +1290,8 @@ def list_jobs(db: Session = Depends(get_db), user: User = Depends(require_roles(
             "job_type": j.job_type,
             "priority": j.priority,
             "folder_prefix": j.folder_prefix,
-            "active_verifiers": sorted(verifier_map.get(j.folder_prefix, [])),
+            "active_verifiers": sorted(set(active_map.get(j.folder_prefix, []))),
+            "assigned_verifiers": sorted(set(verifier_map.get(j.folder_prefix, []))),
             "documents_to_review": pending_counts.get(j.folder_prefix, 0),
         }
         for j in visible
@@ -898,8 +1375,148 @@ def export_batch(
     job = sanitize_folder(job)
     ensure_folder_allowed(user, job, db)
     rows = fetch_documents_for_export(job, status=status, limit=2000)
-    return stream_csv_zip(rows)
+    return stream_csv_zip(job, rows)
 
+
+@app.post("/api/export/generate")
+def export_generate(
+    body: ExportGenerateBody,
+    user: User = Depends(require_roles("admin", "verifier")),
+    db: Session = Depends(get_db),
+):
+    key = body.key
+    if not key.startswith("textract-results/"):
+        raise HTTPException(status_code=400, detail="Key must be under textract-results/")
+    parts = key.split("/", 2)
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid key")
+    job_prefix = parts[1]
+    ensure_folder_allowed(user, job_prefix, db)
+
+    payload = load_json_from_s3(key)
+    if not source_exists(payload):
+        raise HTTPException(status_code=404, detail="Source file missing in bucket")
+
+    status = canonical_status(payload.get("status"))
+    if status in ("To Review", "Hold"):
+        raise HTTPException(status_code=400, detail=f"Cannot export document in status '{status}'")
+
+    source_bucket = payload.get("source_bucket") or BRONZE_BUCKET
+    source_key = payload.get("source_file") or payload.get("source_key")
+    if not source_key:
+        raise HTTPException(status_code=400, detail="source_key missing in payload")
+
+    src_obj = S3.get_object(Bucket=source_bucket, Key=source_key)
+    source_bytes = src_obj["Body"].read()
+    source_filename = os.path.basename(source_key)
+
+    export_key = candidate_export_keys(job_prefix, source_filename)[0]
+    zip_bytes = build_export_zip_bytes(job_prefix, payload, source_filename, source_bytes)
+
+    S3.put_object(
+        Bucket=SILVER_BUCKET,
+        Key=export_key,
+        Body=zip_bytes,
+        ContentType="application/zip",
+    )
+
+    payload["status"] = "Exported"
+    payload["export_key"] = export_key
+    payload["exported_at"] = datetime.utcnow().isoformat()
+    payload["exported_by"] = user.email
+    payload["updated_at"] = payload.get("exported_at")
+    payload["updated_by"] = user.email
+    save_json_to_s3(key, payload)
+
+    cfg = get_job_config(job_prefix) or {}
+    auto_ftp = bool(cfg.get("auto_upload_ftp"))
+    ftp_uploaded = False
+    ftp_error = None
+    if (body.upload_ftp or auto_ftp) and EXPORT_FTP_HOST:
+        try:
+            remote_name = f"{job_prefix}/{os.path.basename(export_key)}"
+            _ftp_upload_bytes(remote_name, zip_bytes)
+            ftp_uploaded = True
+        except Exception as exc:
+            ftp_error = str(exc)
+
+    return {
+        "status": "ok",
+        "export_key": export_key,
+        "url": presign_get(SILVER_BUCKET, export_key),
+        "ftp_uploaded": ftp_uploaded,
+        "ftp_error": ftp_error,
+    }
+
+
+@app.post("/api/export/batch/s3")
+def export_batch_to_s3(
+    body: BatchExportS3Body,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+):
+    job = sanitize_folder(body.job)
+    ensure_folder_allowed(user, job, db)
+
+    status = canonical_status(body.status) if body.status else None
+    rows = fetch_documents_for_export(job, status=status, limit=5000)
+
+    export_csv = build_export_csv_bytes(job, rows)
+    meta_csv = build_meta_csv_bytes(rows)
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    status_tag = (status or "all").replace(" ", "_")
+    out_key = f"portal/exports/batch/{job}/{ts}_{status_tag}.zip"
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("export.csv", export_csv)
+        zf.writestr("meta.csv", meta_csv)
+    output.seek(0)
+    zip_bytes = output.getvalue()
+
+    S3.put_object(
+        Bucket=SILVER_BUCKET,
+        Key=out_key,
+        Body=zip_bytes,
+        ContentType="application/zip",
+    )
+
+    # Optionally mark exported
+    if body.mark_exported and status in ("Approved", "Rejected"):
+        for p in rows:
+            doc_key = p.get("key")
+            if not doc_key:
+                continue
+            try:
+                p["status"] = "Exported"
+                p["exported_at"] = datetime.utcnow().isoformat()
+                p["exported_by"] = user.email
+                p["export_key"] = p.get("export_key") or ""
+                save_json_to_s3(doc_key, p)
+            except Exception:
+                continue
+
+    cfg = get_job_config(job) or {}
+    auto_ftp = bool(cfg.get("auto_upload_ftp"))
+    ftp_uploaded = False
+    ftp_error = None
+    if (body.upload_ftp or auto_ftp) and EXPORT_FTP_HOST:
+        try:
+            remote_name = f"{job}/batch/{os.path.basename(out_key)}"
+            _ftp_upload_bytes(remote_name, zip_bytes)
+            ftp_uploaded = True
+        except Exception as exc:
+            ftp_error = str(exc)
+
+    return {
+        "status": "ok",
+        "s3_key": out_key,
+        "url": presign_get(SILVER_BUCKET, out_key),
+        "count": len(rows),
+        "ftp_uploaded": ftp_uploaded,
+        "ftp_error": ftp_error,
+    }
 
 @app.get("/api/customers/lookup")
 def customer_lookup(
@@ -939,13 +1556,132 @@ def admin_reference_reload(_: User = Depends(require_roles("admin"))):
 def admin_reference_upload(file: UploadFile = File(...), _: User = Depends(require_roles("admin"))):
     filename = file.filename or "upload.csv"
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
-    dest = REFERENCE_DIR / safe_name
-    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
-    with dest.open("wb") as f:
-        f.write(file.file.read())
-    # attempt reload after upload
+    payload = file.file.read()
+
+    # Persist to S3 so updates survive redeploys.
+    if REFERENCE_BUCKET:
+        s3_key = f"{REFERENCE_PREFIX}/{safe_name}" if REFERENCE_PREFIX else safe_name
+        S3.put_object(Bucket=REFERENCE_BUCKET, Key=s3_key, Body=payload)
+
+    # Also keep a local copy (useful for local dev); best-effort.
+    try:
+        dest = REFERENCE_DIR / safe_name
+        REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as f:
+            f.write(payload)
+    except Exception:
+        pass
+
+    # reload after upload
     load_reference_tables()
     return {"status": "uploaded", "file": safe_name, "suppliers": len(REFERENCE_DATA["suppliers"])}
+
+
+@app.get("/api/job-config")
+def api_job_config(
+    job: str,
+    user: User = Depends(require_roles("admin", "verifier", "viewer")),
+    db: Session = Depends(get_db),
+):
+    job = sanitize_folder(job)
+    ensure_folder_allowed(user, job, db)
+    return {"job": job, "config": get_job_config(job)}
+
+
+@app.post("/admin/job-config")
+def admin_job_config_save(
+    body: JobConfigBody,
+    user: User = Depends(require_roles("admin")),
+):
+    job = sanitize_folder(body.job)
+    save_job_config(job, body.config)
+    return {"status": "saved", "job": job, "s3_key": job_config_s3_key(job)}
+
+
+@app.get("/api/reports/monthly")
+def report_monthly(
+    month: Optional[str] = None,
+    job: Optional[str] = None,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+):
+    """
+    Monthly reporting per job: document count and total pages, with status breakdown.
+    """
+    if month is None:
+        month = datetime.utcnow().strftime("%Y-%m")
+    month = (month or "").strip()
+    if not MONTH_RE.match(month):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    year, mon = month.split("-", 1)
+    start = datetime(int(year), int(mon), 1)
+    if int(mon) == 12:
+        end = datetime(int(year) + 1, 1, 1)
+    else:
+        end = datetime(int(year), int(mon) + 1, 1)
+
+    q = db.query(Job).order_by(Job.priority.desc(), Job.id.desc())
+    if job:
+        job = sanitize_folder(job)
+        q = q.filter(Job.folder_prefix == job)
+    jobs = q.all()
+
+    def blank_totals():
+        return {"documents": 0, "pages": 0, "by_status": {s: 0 for s in ("To Review", "Approved", "Rejected", "Hold", "Exported")}}
+
+    totals = blank_totals()
+    out = []
+
+    for j in jobs:
+        job_prefix = j.folder_prefix
+        if not job_prefix:
+            continue
+        pref = f"textract-results/{job_prefix.strip('/')}/"
+        paginator = S3.get_paginator("list_objects_v2")
+        stats = blank_totals()
+        for page in paginator.paginate(Bucket=SILVER_BUCKET, Prefix=pref):
+            for obj in page.get("Contents", []):
+                key = obj.get("Key") or ""
+                if not key.lower().endswith(".json"):
+                    continue
+                try:
+                    payload = load_json_from_s3(key)
+                except Exception:
+                    continue
+
+                dt = parse_payload_datetime(payload.get("processed_at")) or parse_payload_datetime(payload.get("updated_at")) or obj.get("LastModified")
+                dt = parse_payload_datetime(dt)
+                if not dt:
+                    continue
+                if not (start <= dt < end):
+                    continue
+
+                stats["documents"] += 1
+                st = canonical_status(payload.get("status"))
+                stats["by_status"][st] = stats["by_status"].get(st, 0) + 1
+                pages = payload.get("page_count") or payload.get("pages") or 0
+                try:
+                    pages = int(pages)
+                except Exception:
+                    pages = 0
+                stats["pages"] += max(pages, 0)
+        if stats["documents"] == 0:
+            continue
+        totals["documents"] += stats["documents"]
+        totals["pages"] += stats["pages"]
+        for k, v in stats["by_status"].items():
+            totals["by_status"][k] = totals["by_status"].get(k, 0) + v
+        out.append(
+            {
+                "job": job_prefix,
+                "customer": j.customer,
+                "name": j.name,
+                "job_type": j.job_type,
+                **stats,
+            }
+        )
+
+    return {"month": month, "jobs": out, "totals": totals}
 
 
 @app.get("/api/documents")
@@ -1091,11 +1827,13 @@ def update_document(
     job_prefix, doc_id = parse_job_doc_from_key(key)
 
     if body.status:
-        payload["status"] = body.status
+        payload["status"] = canonical_status(body.status)
         payload["updated_at"] = datetime.utcnow().isoformat()
         payload["updated_by"] = user.email
-        if body.reason:
+        if payload["status"] == "Rejected" and body.reason:
             payload["reason"] = body.reason
+        elif payload["status"] != "Rejected":
+            payload.pop("reason", None)
 
     if body.fields:
         normalized = payload.get("normalized_data") or []
@@ -1114,6 +1852,14 @@ def update_document(
                     "confidence": 0,
                 })
         payload["normalized_data"] = normalized
+
+    # Validate before persisting when the document is in an exportable/approved state.
+    current_status = canonical_status(payload.get("status"))
+    payload["status"] = current_status
+    if current_status in ("Approved", "Exported"):
+        errors = validate_document(payload, job_prefix)
+        if errors:
+            raise HTTPException(status_code=400, detail={"message": "Validation failed", "errors": errors})
 
     save_json_to_s3(key, payload)
 

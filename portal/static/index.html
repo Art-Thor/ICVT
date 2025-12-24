@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Textract Portal</title>
+  <title>PIQNIC Orbit</title>
   <style>
     :root[data-theme="dark"] {
       --bg: #0c111b;
@@ -42,8 +42,9 @@
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.12); }
     h1, h2, h3 { margin: 0 0 12px 0; font-weight: 700; }
     label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.02em; }
-    input, select { width: 100%; padding: 11px 12px; margin-bottom: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
-    input:focus, select:focus { outline: none; border-color: var(--accent2); box-shadow: 0 0 0 2px rgba(96,165,250,0.25); }
+    input, select, textarea { width: 100%; padding: 11px 12px; margin-bottom: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent2); box-shadow: 0 0 0 2px rgba(96,165,250,0.25); }
+    textarea { resize: vertical; min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     button { background: var(--accent); color: #0f172a; padding: 10px 14px; border: none; border-radius: 10px; cursor: pointer; font-weight: 700; box-shadow: 0 10px 25px rgba(74,222,128,0.25); transition: transform 0.1s ease, box-shadow 0.1s ease; }
     button:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(74,222,128,0.35); }
     button.secondary { background: var(--accent2); color: #0f172a; box-shadow: 0 10px 25px rgba(96,165,250,0.25); }
@@ -247,6 +248,36 @@
       </div>
 
       <div class="card">
+        <h2>Job configuration (JSON)</h2>
+        <div class="grid">
+          <div><label>Job prefix</label><input id="jobConfigPrefix" type="text" placeholder="e.g. JAR"></div>
+        </div>
+        <label>Config JSON</label>
+        <textarea id="jobConfigJson" placeholder='{"required_fields":["Invoice Number","Invoice Date"],"export_schema":[{"column":"Invoice No","field":"Invoice Number"}]}'></textarea>
+        <div class="row" style="gap:8px;">
+          <button class="secondary" id="jobConfigLoadBtn">Load</button>
+          <button id="jobConfigSaveBtn">Save</button>
+        </div>
+        <div class="status" id="jobConfigStatus">Not loaded</div>
+      </div>
+
+      <div class="card">
+        <h2>Reporting</h2>
+        <div class="grid">
+          <div><label>Month</label><input id="reportMonth" type="month"></div>
+          <div><label>Job prefix (optional)</label><input id="reportJobPrefix" type="text" placeholder="e.g. JAR"></div>
+        </div>
+        <button class="secondary" id="runReportBtn">Run report</button>
+        <div class="status" id="reportStatus">Not run</div>
+        <div class="table-wrap">
+          <table id="reportTable">
+            <thead><tr><th>Job</th><th>Documents</th><th>Pages</th><th>To Review</th><th>Approved</th><th>Rejection Status</th><th>Hold</th><th>Exported</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Reference data (CSV)</h2>
         <div class="grid">
           <div>
@@ -262,16 +293,17 @@
   </main>
 
   <script>
-    const state = {
-      token: localStorage.getItem('token') || '',
-      role: localStorage.getItem('role') || '',
-      email: localStorage.getItem('email') || '',
-      jobs: [],
-      users: [],
-      current: { folder: '', filename: '', key: '' },
-      polling: null,
-      selectedJob: null,
-      documents: [],
+	    const state = {
+	      token: localStorage.getItem('token') || '',
+	      role: localStorage.getItem('role') || '',
+	      email: localStorage.getItem('email') || '',
+	      jobs: [],
+	      users: [],
+	      jobConfig: {},
+	      current: { folder: '', filename: '', key: '' },
+	      polling: null,
+	      selectedJob: null,
+	      documents: [],
       docCursor: null,
       selectedDoc: null,
       layout: localStorage.getItem('docLayout') || 'row-lr',
@@ -327,7 +359,9 @@
             <option value="To Review" selected>To Review</option>
             <option value="">All</option>
             <option value="Approved">Approved</option>
-            <option value="Rejected">Rejected</option>
+            <option value="Rejected">Rejection Status</option>
+            <option value="Hold">Hold</option>
+            <option value="Exported">Exported</option>
           </select>
         </div>
         <div>
@@ -367,14 +401,18 @@
     docsContainer.appendChild(docsCard);
 
     const docDetailCard = document.createElement('div');
-    docDetailCard.className = 'card hidden';
-    docDetailCard.innerHTML = `
-      <h3>Document</h3>
-      <div id="docInfo"></div>
-      <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap;">
-        <button class="secondary" data-layout="row-lr">Doc left</button>
-        <button class="secondary" data-layout="row-rl">Doc right</button>
-        <button class="secondary" data-layout="col-tb">Doc top</button>
+	    docDetailCard.className = 'card hidden';
+	    docDetailCard.innerHTML = `
+	      <h3>Document</h3>
+	      <div id="docInfo"></div>
+	      <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0;">
+	        <button id="docGenerateExportBtn" class="secondary">Export to S3</button>
+	        <div id="docExportStatus" class="status" style="margin:0; flex:1 1 320px;">Export not generated</div>
+	      </div>
+	      <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap;">
+	        <button class="secondary" data-layout="row-lr">Doc left</button>
+	        <button class="secondary" data-layout="row-rl">Doc right</button>
+	        <button class="secondary" data-layout="col-tb">Doc top</button>
         <button class="secondary" data-layout="col-bt">Doc bottom</button>
         <div class="zoom-controls">
           <button id="zoomIn" class="secondary">+</button>
@@ -410,34 +448,74 @@
           <select id="docStatusSelect" class="compact-select">
             <option value="To Review">To Review</option>
             <option value="Approved">Approved</option>
-            <option value="Rejected">Rejected</option>
+            <option value="Rejected">Rejection Status</option>
+            <option value="Hold">Hold</option>
+            <option value="Exported">Exported</option>
           </select>
         </div>
         <div id="docReasonWrap" class="hidden">
-          <label>Reason (for Rejected)</label>
+          <label>Rejection reason</label>
           <select id="docReasonSelect" class="compact-select">
             <option value="">Select reason</option>
             <option value="Not valid">Not valid</option>
             <option value="Illegible">Illegible</option>
             <option value="Missing date/number">Missing date/number</option>
             <option value="Unknown supplier">Unknown supplier</option>
+            <option value="Duplicate">Duplicate</option>
+            <option value="Wrong job">Wrong job</option>
+            <option value="Not an invoice">Not an invoice</option>
+            <option value="Missing PO">Missing PO</option>
             <option value="Other">Other</option>
           </select>
         </div>
         <button id="docSaveBtn">Save</button>
       </div>
-    `;
-    docsContainer.appendChild(docDetailCard);
+	    `;
+	    docsContainer.appendChild(docDetailCard);
 
-    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
-    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
-    const customerLookupInput = document.getElementById('customerLookupInput');
-    const customerLookupBtn = document.getElementById('customerLookupBtn');
-    const customerLookupStatus = document.getElementById('customerLookupStatus');
+		    const docExportStatus = docDetailCard.querySelector('#docExportStatus');
+		    const docGenerateExportBtn = docDetailCard.querySelector('#docGenerateExportBtn');
+		    const docReasonWrap = docDetailCard.querySelector('#docReasonWrap');
+		    const docReasonSelect = docDetailCard.querySelector('#docReasonSelect');
+	    const customerLookupInput = document.getElementById('customerLookupInput');
+	    const customerLookupBtn = document.getElementById('customerLookupBtn');
+	    const customerLookupStatus = document.getElementById('customerLookupStatus');
 
-    const createUserBtn = document.getElementById('createUserBtn');
-    const usersStatus = document.getElementById('usersStatus');
-    const usersTableBody = document.querySelector('#usersTable tbody');
+	    if (docGenerateExportBtn) {
+	      docGenerateExportBtn.addEventListener('click', async () => {
+	        if (!state.selectedDoc) return;
+	        try {
+	          docGenerateExportBtn.disabled = true;
+	          if (docExportStatus) docExportStatus.textContent = 'Generating export…';
+	          const res = await api('/api/export/generate', {
+	            method: 'POST',
+	            body: JSON.stringify({ key: state.selectedDoc.key, upload_ftp: false })
+	          });
+	          if (state.selectedDoc && state.selectedDoc.payload) {
+	            state.selectedDoc.payload.status = 'Exported';
+	          }
+	          const statusSel = docDetailCard.querySelector('#docStatusSelect');
+	          if (statusSel) statusSel.value = 'Exported';
+	          await refreshDocs(true);
+	          await lookupDocExport();
+	          if (res && res.url && docExportStatus) {
+	            docExportStatus.innerHTML = `<span class="pill green">Ready</span> <a href="${res.url}" target="_blank">Download ZIP</a> <span style="color:var(--muted);">${res.export_key || ''}</span>`;
+	          }
+	        } catch (e) {
+	          if (docExportStatus) docExportStatus.textContent = 'Export error: ' + e.message;
+	        } finally {
+	          if (docGenerateExportBtn) {
+	            const statusSel = docDetailCard.querySelector('#docStatusSelect');
+	            const s = statusSel ? (statusSel.value || '') : '';
+	            docGenerateExportBtn.disabled = (s === 'To Review' || s === 'Hold' || s === 'Exported');
+	          }
+	        }
+	      });
+	    }
+
+	    const createUserBtn = document.getElementById('createUserBtn');
+	    const usersStatus = document.getElementById('usersStatus');
+	    const usersTableBody = document.querySelector('#usersTable tbody');
     const userEmail = document.getElementById('userEmail');
     const userPass = document.getElementById('userPass');
     const userRole = document.getElementById('userRole');
@@ -449,13 +527,36 @@
 
     const createJobBtn = document.getElementById('createJobBtn');
     const jobsAdminStatus = document.getElementById('jobsAdminStatus');
-    const jobCustomer = document.getElementById('jobCustomer');
-    const jobName = document.getElementById('jobName');
-    const jobType = document.getElementById('jobType');
-    const jobPriority = document.getElementById('jobPriority');
-    const jobFolderPrefix = document.getElementById('jobFolderPrefix');
-    const jobVerifiers = document.getElementById('jobVerifiers');
-    const pdfRenderState = { url: null, norm: [], scale: 1, focusBox: null, pageViewport: null, highlightBox: null };
+	    const jobCustomer = document.getElementById('jobCustomer');
+	    const jobName = document.getElementById('jobName');
+	    const jobType = document.getElementById('jobType');
+	    const jobPriority = document.getElementById('jobPriority');
+	    const jobFolderPrefix = document.getElementById('jobFolderPrefix');
+	    const jobVerifiers = document.getElementById('jobVerifiers');
+	    const jobConfigPrefix = document.getElementById('jobConfigPrefix');
+	    const jobConfigJson = document.getElementById('jobConfigJson');
+	    const jobConfigLoadBtn = document.getElementById('jobConfigLoadBtn');
+	    const jobConfigSaveBtn = document.getElementById('jobConfigSaveBtn');
+	    const jobConfigStatus = document.getElementById('jobConfigStatus');
+	    const reportMonth = document.getElementById('reportMonth');
+	    const reportJobPrefix = document.getElementById('reportJobPrefix');
+	    const runReportBtn = document.getElementById('runReportBtn');
+	    const reportStatus = document.getElementById('reportStatus');
+	    const reportTableBody = document.querySelector('#reportTable tbody');
+	    const pdfRenderState = {
+	      url: null,
+	      norm: [],
+	      scale: 1,
+      focusBox: null,
+      pageViewport: null,
+      highlightBox: null,
+      pdf: null,
+      page: null,
+      baseViewport: null,
+      loadingTask: null,
+      renderTask: null,
+      renderId: 0,
+    };
     const themeToggle = document.getElementById('themeToggle');
     const layoutButtons = document.querySelectorAll('[data-layout]');
 
@@ -491,13 +592,14 @@
         themeToggle.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
       }
     }
-    window.logout = function() {
-      state.token = ''; state.role=''; state.email=''; state.selectedJob = null;
-      if (jobContext) { jobContext.classList.add('hidden'); jobContext.textContent = ''; }
-      if (docsJobLabel) { docsJobLabel.textContent = ''; }
-      localStorage.removeItem('token'); localStorage.removeItem('role'); localStorage.removeItem('email');
-      setUserInfo(); showView('login');
-    }
+	    window.logout = function() {
+	      if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
+	      state.token = ''; state.role=''; state.email=''; state.selectedJob = null;
+	      if (jobContext) { jobContext.classList.add('hidden'); jobContext.textContent = ''; }
+	      if (docsJobLabel) { docsJobLabel.textContent = ''; }
+	      localStorage.removeItem('token'); localStorage.removeItem('role'); localStorage.removeItem('email');
+	      setUserInfo(); showView('login');
+	    }
 
     navButtons.forEach(btn => btn.addEventListener('click', () => {
       const v = btn.dataset.view;
@@ -545,19 +647,53 @@
       return true;
     }
 
-    async function api(path, options = {}) {
-      const headers = options.headers || {};
-      headers['Content-Type'] = options.body ? 'application/json' : headers['Content-Type'];
-      if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-      const resp = await fetch(path, { ...options, headers });
-      if (!resp.ok) throw new Error(await resp.text());
-      return resp.json();
-    }
+	    async function api(path, options = {}) {
+	      const headers = options.headers || {};
+	      headers['Content-Type'] = options.body ? 'application/json' : headers['Content-Type'];
+	      if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+	      const resp = await fetch(path, { ...options, headers });
+	      const text = await resp.text();
+	      let data = null;
+	      if (text) {
+	        try { data = JSON.parse(text); } catch (_) { data = null; }
+	      }
+	      if (!resp.ok) {
+	        const detail = data && (data.detail ?? data.error ?? data.message);
+	        let msg = text || resp.statusText || 'Request failed';
+	        if (typeof detail === 'string') {
+	          msg = detail;
+	        } else if (detail && typeof detail === 'object') {
+	          msg = detail.message || msg;
+	          if (Array.isArray(detail.errors) && detail.errors.length) {
+	            const parts = detail.errors.slice(0, 6).map(e => `${e.field || 'field'}: ${e.error || 'invalid'}`);
+	            msg += ` (${parts.join(', ')}${detail.errors.length > 6 ? '…' : ''})`;
+	          }
+	        }
+	        throw new Error(msg);
+	      }
+	      return data ?? {};
+	    }
 
-    loginBtn.addEventListener('click', async () => {
-      try {
-        loginBtn.disabled = true;
-        loginStatus.textContent = 'Signing in...';
+	    let presenceInterval = null;
+	    async function pingPresence() {
+	      if (!state.token || !state.selectedJob) return;
+	      try {
+	        await api('/api/presence', { method: 'POST', body: JSON.stringify({ folder_prefix: state.selectedJob.folder_prefix }) });
+	      } catch (_) {
+	        // ignore presence failures
+	      }
+	    }
+	    function startPresence(jobPrefix) {
+	      if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
+	      if (!jobPrefix) return;
+	      pingPresence();
+	      presenceInterval = setInterval(pingPresence, 30000);
+	    }
+
+	    loginBtn.addEventListener('click', async () => {
+	      try {
+	        loginBtn.disabled = true;
+	        loginStatus.textContent = 'Signing in...';
         const data = await api('/auth/login', { method: 'POST', body: JSON.stringify({ email: loginEmail.value, password: loginPass.value }) });
         state.token = data.token; state.role = data.role; state.email = data.email;
         localStorage.setItem('token', state.token);
@@ -581,38 +717,55 @@
         const jobs = await api('/jobs');
         state.jobs = jobs;
         jobsTableBody.innerHTML = '';
-        for (const j of jobs) {
-          const tr = document.createElement('tr');
-          const verifiers = Array.isArray(j.active_verifiers) ? j.active_verifiers.join(', ') : (j.active_verifiers ?? '');
-          tr.innerHTML = `<td>${j.customer}</td><td>${j.name}</td><td>${j.job_type}</td><td>${j.documents_to_review ?? '-'}</td><td>${j.priority}</td><td>${j.folder_prefix}</td><td>${verifiers || '-'}</td>`;
-          tr.addEventListener('click', () => selectJob(j));
-          jobsTableBody.appendChild(tr);
-        }
+	        for (const j of jobs) {
+	          const tr = document.createElement('tr');
+	          const active = Array.isArray(j.active_verifiers) ? j.active_verifiers : [];
+	          const assigned = Array.isArray(j.assigned_verifiers) ? j.assigned_verifiers : [];
+	          const activeText = active.join(', ');
+	          const verifiersHtml = `${activeText || '-'}${assigned.length ? ` <span style="color:var(--muted);">(${assigned.length} assigned)</span>` : ''}`;
+	          tr.innerHTML = `<td>${j.customer}</td><td>${j.name}</td><td>${j.job_type}</td><td>${j.documents_to_review ?? '-'}</td><td>${j.priority}</td><td>${j.folder_prefix}</td><td>${verifiersHtml}</td>`;
+	          tr.addEventListener('click', () => selectJob(j));
+	          jobsTableBody.appendChild(tr);
+	        }
         jobsStatus.textContent = `${jobs.length} results`;
       } catch (e) {
         jobsStatus.textContent = 'Error: ' + e.message;
       }
     }
 
-    function selectJob(job) {
+    async function loadJobConfig(jobPrefix) {
+      state.jobConfig = {};
+      if (!jobPrefix) return;
+      try {
+        const data = await api('/api/job-config?job=' + encodeURIComponent(jobPrefix), { method: 'GET' });
+        state.jobConfig = (data && data.config && typeof data.config === 'object') ? data.config : {};
+      } catch (_) {
+        state.jobConfig = {};
+      }
+    }
+
+    async function selectJob(job) {
       state.selectedJob = job;
       selectedJobBox.textContent = `Selected: ${job.customer} / ${job.name} (${job.folder_prefix})`;
       if (jobContext) {
         jobContext.textContent = `${job.customer} / ${job.name} (${job.folder_prefix})`;
         jobContext.classList.remove('hidden');
       }
-      if (docsJobLabel) {
-        docsJobLabel.textContent = ` — ${job.customer} / ${job.name} (${job.folder_prefix})`;
-      }
-      jobFolderInput.value = job.folder_prefix;
-      uploadCard.classList.remove('hidden');
-      docsCard.classList.remove('hidden');
-      docDetailCard.classList.add('hidden');
-      setCollapsed('jobsList', true);
-      setCollapsed('upload', false);
-      setCollapsed('docs', false);
-      refreshDocs(true);
-    }
+	      if (docsJobLabel) {
+	        docsJobLabel.textContent = ` — ${job.customer} / ${job.name} (${job.folder_prefix})`;
+	      }
+	      jobFolderInput.value = job.folder_prefix;
+	      if (jobConfigPrefix) jobConfigPrefix.value = job.folder_prefix;
+	      uploadCard.classList.remove('hidden');
+	      docsCard.classList.remove('hidden');
+	      docDetailCard.classList.add('hidden');
+	      setCollapsed('jobsList', true);
+	      setCollapsed('upload', false);
+	      setCollapsed('docs', false);
+	      await loadJobConfig(job.folder_prefix);
+	      startPresence(job.folder_prefix);
+	      refreshDocs(true);
+	    }
 
     async function refreshDocs(reset=false) {
       if (!state.selectedJob) return;
@@ -807,19 +960,23 @@
       });
     }
 
-    function renderDocDetail() {
-      if (!state.selectedDoc) return;
-      docDetailCard.classList.remove('hidden');
-      const info = docDetailCard.querySelector('#docInfo');
-      const statusSel = docDetailCard.querySelector('#docStatusSelect');
-      const fieldsWrap = docDetailCard.querySelector('#docFields');
-      const layoutWrap = document.getElementById('docLayoutWrap');
-      setLayout(state.layout);
+	    function renderDocDetail() {
+	      if (!state.selectedDoc) return;
+	      docDetailCard.classList.remove('hidden');
+	      const info = docDetailCard.querySelector('#docInfo');
+	      const statusSel = docDetailCard.querySelector('#docStatusSelect');
+	      const fieldsWrap = docDetailCard.querySelector('#docFields');
+	      const layoutWrap = document.getElementById('docLayoutWrap');
+	      setLayout(state.layout);
 
-      statusSel.value = state.selectedDoc.payload.status || 'To Review';
-      if (docReasonSelect) {
-        docReasonSelect.value = state.selectedDoc.payload.reason || '';
-      }
+	      statusSel.value = state.selectedDoc.payload.status || 'To Review';
+	      if (docGenerateExportBtn) {
+	        const s = statusSel.value || 'To Review';
+	        docGenerateExportBtn.disabled = (s === 'To Review' || s === 'Hold' || s === 'Exported');
+	      }
+	      if (docReasonSelect) {
+	        docReasonSelect.value = state.selectedDoc.payload.reason || '';
+	      }
       const toggleReason = () => {
         if (!docReasonWrap) return;
         const show = statusSel.value === 'Rejected';
@@ -837,10 +994,36 @@
 
       fieldsWrap.innerHTML = '';
       pdfRenderState.highlightBox = null;
+      const cfg = state.jobConfig || {};
+      const fieldOrder = Array.isArray(cfg.field_order) ? cfg.field_order : null;
+      const fieldAliases = (cfg.field_aliases && typeof cfg.field_aliases === 'object') ? cfg.field_aliases : {};
+      const requiredSet = new Set(Array.isArray(cfg.required_fields) ? cfg.required_fields.map(v => String(v || '').toLowerCase()) : []);
+
       const norm = state.selectedDoc.payload.normalized_data || [];
+      const keyOf = (f) => String(f.key || f.field_name || '').trim();
+      const lower = (s) => String(s || '').trim().toLowerCase();
+      const byKey = {};
+      norm.forEach(f => { const k = lower(keyOf(f)); if (k) byKey[k] = f; });
+      const ordered = [];
+      const used = new Set();
+      if (fieldOrder) {
+        fieldOrder.forEach(name => {
+          const k = lower(name);
+          if (!k) return;
+          const found = byKey[k];
+          if (found) ordered.push(found);
+          else ordered.push({ key: String(name), value: '', confidence: 0 });
+          used.add(k);
+        });
+      }
+      norm.forEach(f => {
+        const k = lower(keyOf(f));
+        if (!k || used.has(k)) return;
+        ordered.push(f);
+      });
       // Build supplier suggestions from normalized data
       const supplierNames = new Set();
-      norm.forEach(n => {
+      ordered.forEach(n => {
         const k = (n.key || n.field_name || '').toLowerCase();
         if (k.includes('supplier') || k.includes('vendor') || k.includes('creditor')) {
           if (n.value) supplierNames.add(n.value);
@@ -862,10 +1045,11 @@
           dl.appendChild(opt);
         });
       }
-      norm.forEach((f, idx) => {
+      ordered.forEach((f, idx) => {
         const div = document.createElement('div');
         const bbox = f.BoundingBox || f.boundingBox || f.value_box || f.box;
         const fieldKey = f.key || f.field_name || 'Field ' + idx;
+        const displayKey = fieldAliases[fieldKey] || fieldKey;
         const conf = normalizeConfidence(f.confidence ?? f.gptConfidence);
         const color = confidenceColor(conf);
         const validation = f.validation || {};
@@ -873,8 +1057,9 @@
         if (validation.status === 'match') {
           badge = `<span class="pill green" style="margin-left:6px;">ref</span>`;
         }
+        const requiredBadge = requiredSet.has(lower(fieldKey)) ? `<span class="pill amber" style="margin-left:6px;">required</span>` : '';
         div.innerHTML = `
-          <label>${fieldKey}${badge}</label>
+          <label>${displayKey}${badge}${requiredBadge}</label>
           <input data-field="${fieldKey}" data-left="${bbox && bbox.Left != null ? bbox.Left : ''}" data-top="${bbox && bbox.Top != null ? bbox.Top : ''}" data-width="${bbox && bbox.Width != null ? bbox.Width : ''}" data-height="${bbox && bbox.Height != null ? bbox.Height : ''}" value="${f.value || ''}">
         `;
         fieldsWrap.appendChild(div);
@@ -889,13 +1074,14 @@
           inputEl.addEventListener('click', () => handleFieldFocus(bbox));
         }
       });
-      if (!norm.length) {
+      if (!ordered.length) {
         fieldsWrap.innerHTML = '<div>No normalized_data</div>';
       }
 
-      const pdfUrl = internalPdf || state.selectedDoc.pdf_url;
-      renderPdfOverlay(pdfUrl, norm);
-    }
+	      const pdfUrl = internalPdf || state.selectedDoc.pdf_url;
+	      renderPdfOverlay(pdfUrl, ordered);
+	      lookupDocExport();
+	    }
 
     function scrollToBoundingBox(box) {
       const container = document.getElementById('pdfContainer');
@@ -934,11 +1120,17 @@
       zoomToBoundingBox(bbox);
     }
 
+    function fitScaleForContainer(container, baseViewport) {
+      if (!container || !baseViewport) return 1;
+      const pad = 24; // allow room for borders/scrollbar
+      const w = Math.max(1, container.clientWidth - pad);
+      const fit = w / Math.max(1, baseViewport.width);
+      return Math.min(3, Math.max(0.5, fit));
+    }
+
     async function renderPdfOverlay(url, norm) {
       const canvas = document.getElementById('pdfCanvas');
       const overlay = document.getElementById('pdfOverlay');
-      const zoomIn = document.getElementById('zoomIn');
-      const zoomOut = document.getElementById('zoomOut');
       overlay.innerHTML = '';
 
       if (!url || !window.pdfjsLib) {
@@ -946,32 +1138,68 @@
         return;
       }
 
-      if (pdfRenderState.url !== url) {
-        pdfRenderState.scale = 1;
-        pdfRenderState.focusBox = null;
-        pdfRenderState.highlightBox = null;
-      }
+      const container = document.getElementById('pdfContainer');
+      const prevUrl = pdfRenderState.url;
+      const urlChanged = prevUrl !== url;
+      const thisRender = ++pdfRenderState.renderId;
       pdfRenderState.url = url;
       pdfRenderState.norm = norm || [];
 
       try {
-        const loadingTask = window.pdfjsLib.getDocument({
-          url,
-          withCredentials: false,
-          httpHeaders: state.token ? { 'Authorization': 'Bearer ' + state.token } : {},
-          isEvalSupported: false,
-          disableRange: true,
-        });
-        const pdf = await loadingTask.promise;
-        const page = await pdf.getPage(1);
-        const viewport = page.getViewport({ scale: pdfRenderState.scale });
+        // New PDF URL => load once and cache pdf/page.
+        if (urlChanged || !pdfRenderState.pdf) {
+          if (pdfRenderState.renderTask) {
+            try { pdfRenderState.renderTask.cancel(); } catch (_) {}
+            pdfRenderState.renderTask = null;
+          }
+          if (pdfRenderState.loadingTask) {
+            try { await pdfRenderState.loadingTask.destroy(); } catch (_) {}
+            pdfRenderState.loadingTask = null;
+          }
+          pdfRenderState.pdf = null;
+          pdfRenderState.page = null;
+          pdfRenderState.baseViewport = null;
+          pdfRenderState.focusBox = null;
+          pdfRenderState.highlightBox = null;
+
+          overlay.innerHTML = '<div style="padding:12px;color:var(--muted);">Loading PDF…</div>';
+
+          pdfRenderState.loadingTask = window.pdfjsLib.getDocument({
+            url,
+            withCredentials: false,
+            httpHeaders: state.token ? { 'Authorization': 'Bearer ' + state.token } : {},
+            isEvalSupported: false,
+            disableRange: true,
+          });
+          const pdf = await pdfRenderState.loadingTask.promise;
+          if (thisRender !== pdfRenderState.renderId) return;
+          pdfRenderState.pdf = pdf;
+          pdfRenderState.page = await pdf.getPage(1);
+          if (thisRender !== pdfRenderState.renderId) return;
+          pdfRenderState.baseViewport = pdfRenderState.page.getViewport({ scale: 1 });
+          pdfRenderState.scale = fitScaleForContainer(container, pdfRenderState.baseViewport);
+        }
+
+        if (!pdfRenderState.page) {
+          overlay.innerHTML = '<div style="padding:12px;color:var(--danger);">PDF render error: page not available</div>';
+          return;
+        }
+
+        const viewport = pdfRenderState.page.getViewport({ scale: pdfRenderState.scale });
         pdfRenderState.pageViewport = viewport;
         const ctx = canvas.getContext('2d');
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         canvas.style.width = viewport.width + 'px';
         canvas.style.height = viewport.height + 'px';
-        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        if (pdfRenderState.renderTask) {
+          try { pdfRenderState.renderTask.cancel(); } catch (_) {}
+          pdfRenderState.renderTask = null;
+        }
+        pdfRenderState.renderTask = pdfRenderState.page.render({ canvasContext: ctx, viewport });
+        await pdfRenderState.renderTask.promise;
+        if (thisRender !== pdfRenderState.renderId) return;
 
         overlay.style.width = viewport.width + 'px';
         overlay.style.height = viewport.height + 'px';
@@ -995,9 +1223,6 @@
           overlay.appendChild(hl);
         }
 
-        zoomIn.onclick = () => { pdfRenderState.scale = Math.min(pdfRenderState.scale + 0.1, 3); pdfRenderState.focusBox = null; renderPdfOverlay(url, norm); };
-        zoomOut.onclick = () => { pdfRenderState.scale = Math.max(pdfRenderState.scale - 0.1, 0.5); pdfRenderState.focusBox = null; renderPdfOverlay(url, norm); };
-
         if (pdfRenderState.focusBox) {
           scrollToBoundingBox(pdfRenderState.focusBox);
           pdfRenderState.focusBox = null;
@@ -1006,6 +1231,36 @@
         overlay.innerHTML = `<div style="padding:12px;color:var(--danger);">PDF render error: ${err}</div><div style="padding:6px;color:var(--muted);word-break:break-all;">${url || 'No PDF URL'}</div>`;
       }
     }
+
+    // Zoom controls: bind once so they still work even if a render fails mid-way.
+    const zoomInBtn = document.getElementById('zoomIn');
+    const zoomOutBtn = document.getElementById('zoomOut');
+    if (zoomInBtn) {
+      zoomInBtn.addEventListener('click', () => {
+        if (!pdfRenderState.url) return;
+        pdfRenderState.scale = Math.min(pdfRenderState.scale + 0.1, 4);
+        pdfRenderState.focusBox = null;
+        renderPdfOverlay(pdfRenderState.url, pdfRenderState.norm);
+      });
+    }
+    if (zoomOutBtn) {
+      zoomOutBtn.addEventListener('click', () => {
+        if (!pdfRenderState.url) return;
+        pdfRenderState.scale = Math.max(pdfRenderState.scale - 0.1, 0.5);
+        pdfRenderState.focusBox = null;
+        renderPdfOverlay(pdfRenderState.url, pdfRenderState.norm);
+      });
+    }
+
+    // Re-fit the PDF to the container on resize (only when not zoomed in).
+    window.addEventListener('resize', () => {
+      const container = document.getElementById('pdfContainer');
+      if (!pdfRenderState.url || !pdfRenderState.baseViewport || !container) return;
+      if (pdfRenderState.scale <= 1.05) {
+        pdfRenderState.scale = fitScaleForContainer(container, pdfRenderState.baseViewport);
+        renderPdfOverlay(pdfRenderState.url, pdfRenderState.norm);
+      }
+    });
 
     async function requestUploadUrl(folder, filename, contentType) {
       return api('/api/upload-url', {
@@ -1040,17 +1295,35 @@
       }
     }
 
-    async function lookupExport() {
-      const params = new URLSearchParams({ folder: state.current.folder, filename: state.current.filename });
-      try {
-        const data = await api('/api/export?' + params.toString(), { method: 'GET' });
-        if (data.status === 'ready' && data.url) {
-          exportLink.innerHTML = `<a href="${data.url}" target="_blank">Download ZIP</a>`;
-        } else {
-          exportLink.innerHTML = '';
-        }
-      } catch (_) {}
-    }
+	    async function lookupExport() {
+	      const params = new URLSearchParams({ folder: state.current.folder, filename: state.current.filename });
+	      try {
+	        const data = await api('/api/export?' + params.toString(), { method: 'GET' });
+	        if (data.status === 'ready' && data.url) {
+	          exportLink.innerHTML = `<a href="${data.url}" target="_blank">Download ZIP</a>`;
+	        } else {
+	          exportLink.innerHTML = '';
+	        }
+	      } catch (_) {}
+	    }
+
+	    async function lookupDocExport() {
+	      if (!docExportStatus) return;
+	      if (!state.selectedDoc) { docExportStatus.textContent = 'No document selected'; return; }
+	      const srcKey = state.selectedDoc.source_file || (state.selectedDoc.payload && state.selectedDoc.payload.source_file) || '';
+	      if (!srcKey) { docExportStatus.textContent = 'No source file'; return; }
+	      try {
+	        const qs = new URLSearchParams({ key: srcKey });
+	        const data = await api('/api/export?' + qs.toString(), { method: 'GET' });
+	        if (data.status === 'ready' && data.url) {
+	          docExportStatus.innerHTML = `<span class="pill green">Ready</span> <a href="${data.url}" target="_blank">Download ZIP</a> <span style="color:var(--muted);">${data.key || ''}</span>`;
+	        } else {
+	          docExportStatus.innerHTML = `<span class="pill amber">Not generated</span>`;
+	        }
+	      } catch (e) {
+	        docExportStatus.textContent = 'Export lookup error: ' + e.message;
+	      }
+	    }
 
     function renderTextract(json) {
       rawJson.textContent = JSON.stringify(json, null, 2);
@@ -1145,7 +1418,7 @@
     if (groupPrev) groupPrev.addEventListener('click', () => shiftPeriod(-1));
     if (groupNext) groupNext.addEventListener('click', () => shiftPeriod(1));
 
-    docDetailCard.querySelector('#docSaveBtn').addEventListener('click', async () => {
+	    docDetailCard.querySelector('#docSaveBtn').addEventListener('click', async () => {
       if (!state.selectedDoc) return;
       try {
         const statusSel = docDetailCard.querySelector('#docStatusSelect');
@@ -1153,14 +1426,14 @@
         const fields = Array.from(inputs).map(i => ({ field_name: i.dataset.field, value: i.value }));
         const reasonVal = statusSel.value === 'Rejected' && docReasonSelect ? docReasonSelect.value : '';
         const currentKey = state.selectedDoc.key;
-        await api('/api/documents', {
-          method: 'PATCH',
-          body: JSON.stringify({ key: state.selectedDoc.key, status: statusSel.value, reason: reasonVal, fields })
-        });
-        await refreshDocs(true);
-        const nextDoc = findNextToReview(currentKey);
-        if (nextDoc) {
-          openDoc(nextDoc);
+	        await api('/api/documents', {
+	          method: 'PATCH',
+	          body: JSON.stringify({ key: state.selectedDoc.key, status: statusSel.value, reason: reasonVal, fields })
+		    });
+	        await refreshDocs(true);
+	        const nextDoc = findNextToReview(currentKey);
+	        if (nextDoc) {
+	          openDoc(nextDoc);
         } else {
           state.selectedDoc = null;
           docDetailCard.classList.add('hidden');
@@ -1258,57 +1531,130 @@
       }
     }
 
-    createJobBtn.addEventListener('click', async () => {
-      try {
-        jobsAdminStatus.textContent = 'Creating...';
-        await api('/admin/jobs', {
-          method: 'POST',
-          body: JSON.stringify({
-            customer: jobCustomer.value,
-            name: jobName.value,
-            job_type: jobType.value,
-            priority: parseInt(jobPriority.value || '0', 10),
-            folder_prefix: jobFolderPrefix.value,
-            active_verifiers: parseInt(jobVerifiers.value || '0', 10),
-          })
-        });
-        jobsAdminStatus.textContent = 'Job created';
-        await refreshJobs();
-        renderAccessFolders();
-      } catch (e) {
-        jobsAdminStatus.textContent = 'Error: ' + e.message;
-      }
-    });
+	    createJobBtn.addEventListener('click', async () => {
+	      try {
+	        jobsAdminStatus.textContent = 'Creating...';
+	        await api('/admin/jobs', {
+	          method: 'POST',
+	          body: JSON.stringify({
+	            customer: jobCustomer.value,
+	            name: jobName.value,
+	            job_type: jobType.value,
+	            priority: parseInt(jobPriority.value || '0', 10),
+	            folder_prefix: jobFolderPrefix.value,
+	            active_verifiers: parseInt(jobVerifiers.value || '0', 10),
+	          })
+	        });
+	        jobsAdminStatus.textContent = 'Job created';
+	        await refreshJobs();
+	        renderAccessFolders();
+	      } catch (e) {
+	        jobsAdminStatus.textContent = 'Error: ' + e.message;
+	      }
+	    });
 
-    // Access matrix summary
-    const accessSummaryTableBody = document.createElement('tbody');
-    function renderAccessSummary() {
-      const table = document.getElementById('accessSummaryTable');
+	    async function adminLoadJobConfig() {
+	      if (state.role !== 'admin') return;
+	      const job = (jobConfigPrefix && jobConfigPrefix.value || '').trim();
+	      if (!job) { if (jobConfigStatus) jobConfigStatus.textContent = 'Enter job prefix'; return; }
+	      try {
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Loading...';
+	        const data = await api('/api/job-config?job=' + encodeURIComponent(job), { method: 'GET' });
+	        const cfg = (data && data.config && typeof data.config === 'object') ? data.config : {};
+	        if (jobConfigJson) jobConfigJson.value = JSON.stringify(cfg, null, 2);
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Loaded';
+	      } catch (e) {
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Error: ' + e.message;
+	      }
+	    }
+
+	    async function adminSaveJobConfig() {
+	      if (state.role !== 'admin') return;
+	      const job = (jobConfigPrefix && jobConfigPrefix.value || '').trim();
+	      if (!job) { if (jobConfigStatus) jobConfigStatus.textContent = 'Enter job prefix'; return; }
+	      let cfg = {};
+	      try {
+	        cfg = JSON.parse((jobConfigJson && jobConfigJson.value) || '{}');
+	      } catch (e) {
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'JSON parse error: ' + e.message;
+	        return;
+	      }
+	      try {
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Saving...';
+	        await api('/admin/job-config', { method: 'POST', body: JSON.stringify({ job, config: cfg }) });
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Saved';
+	        if (state.selectedJob && state.selectedJob.folder_prefix === job) {
+	          await loadJobConfig(job);
+	          renderDocDetail();
+	        }
+	      } catch (e) {
+	        if (jobConfigStatus) jobConfigStatus.textContent = 'Error: ' + e.message;
+	      }
+	    }
+
+	    if (jobConfigLoadBtn) jobConfigLoadBtn.addEventListener('click', adminLoadJobConfig);
+	    if (jobConfigSaveBtn) jobConfigSaveBtn.addEventListener('click', adminSaveJobConfig);
+
+	    // Access matrix summary
+	    const accessSummaryTableBody = document.createElement('tbody');
+	    function renderAccessSummary() {
+	      const table = document.getElementById('accessSummaryTable');
       if (!table) return;
       table.querySelector('tbody').replaceWith(accessSummaryTableBody);
     }
-    async function refreshAccessSummary() {
-      const statusEl = document.getElementById('accessSummaryStatus');
-      if (statusEl) statusEl.textContent = 'Loading...';
-      try {
-        const data = await api('/admin/access/summary');
-        accessSummaryTableBody.innerHTML = '';
-        data.forEach(row => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${row.email}</td><td>${row.role}</td><td>${row.jobs.join(', ')}</td>`;
-          accessSummaryTableBody.appendChild(tr);
-        });
-        if (statusEl) statusEl.textContent = `${data.length} users`;
-        renderAccessSummary();
-      } catch (e) {
-        if (statusEl) statusEl.textContent = 'Error: ' + e.message;
-      }
-    }
+	    async function refreshAccessSummary() {
+	      const statusEl = document.getElementById('accessSummaryStatus');
+	      if (statusEl) statusEl.textContent = 'Loading...';
+	      try {
+	        const data = await api('/admin/access/summary');
+	        accessSummaryTableBody.innerHTML = '';
+	        data.forEach(row => {
+	          const tr = document.createElement('tr');
+	          tr.innerHTML = `<td>${row.email}</td><td>${row.role}</td><td>${row.jobs.join(', ')}</td>`;
+	          accessSummaryTableBody.appendChild(tr);
+	        });
+	        if (statusEl) statusEl.textContent = `${data.length} users`;
+	        renderAccessSummary();
+	      } catch (e) {
+	        if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+	      }
+	    }
 
-    function initFromStorage() {
-      const savedTheme = localStorage.getItem('theme') || 'dark';
-      setTheme(savedTheme);
-      if (state.token) {
+	    async function runMonthlyReport() {
+	      if (state.role !== 'admin') return;
+	      const month = (reportMonth && reportMonth.value) ? reportMonth.value : new Date().toISOString().slice(0, 7);
+	      const job = (reportJobPrefix && reportJobPrefix.value || '').trim();
+	      if (reportStatus) reportStatus.textContent = 'Loading...';
+	      if (reportTableBody) reportTableBody.innerHTML = '';
+	      try {
+	        const qs = new URLSearchParams({ month });
+	        if (job) qs.append('job', job);
+	        const data = await api('/api/reports/monthly?' + qs.toString(), { method: 'GET' });
+	        const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
+	        if (reportTableBody) {
+	          jobs.forEach(r => {
+	            const by = r.by_status || {};
+	            const tr = document.createElement('tr');
+	            tr.innerHTML = `<td>${r.job || ''}</td><td>${r.documents || 0}</td><td>${r.pages || 0}</td><td>${by['To Review'] || 0}</td><td>${by['Approved'] || 0}</td><td>${by['Rejected'] || 0}</td><td>${by['Hold'] || 0}</td><td>${by['Exported'] || 0}</td>`;
+	            reportTableBody.appendChild(tr);
+	          });
+	        }
+	        const totals = data && data.totals ? data.totals : null;
+	        if (reportStatus) {
+	          const td = totals ? totals.documents : 0;
+	          const tp = totals ? totals.pages : 0;
+	          reportStatus.textContent = `Month ${month}: ${td} documents, ${tp} pages`;
+	        }
+	      } catch (e) {
+	        if (reportStatus) reportStatus.textContent = 'Error: ' + e.message;
+	      }
+	    }
+	    if (runReportBtn) runReportBtn.addEventListener('click', runMonthlyReport);
+
+	    function initFromStorage() {
+	      const savedTheme = localStorage.getItem('theme') || 'dark';
+	      setTheme(savedTheme);
+	      if (state.token) {
         setUserInfo();
         showView('jobs');
         refreshJobs();
@@ -1321,12 +1667,13 @@
         if (docsJobLabel) { docsJobLabel.textContent = ''; }
         const gb = document.getElementById('docGroupBy');
         if (gb) gb.value = state.groupMode || 'none';
-        const gdi = document.getElementById('groupDateInput');
-        if (gdi) gdi.value = state.groupDate || '';
-      } else {
-        showView('login');
-      }
-    }
+	        const gdi = document.getElementById('groupDateInput');
+	        if (gdi) gdi.value = state.groupDate || '';
+	        if (reportMonth && !reportMonth.value) reportMonth.value = new Date().toISOString().slice(0, 7);
+	      } else {
+	        showView('login');
+	      }
+	    }
 
     setUserInfo();
     initFromStorage();
@@ -1347,28 +1694,26 @@
     }
     renderAccessSummary();
 
-    async function downloadExport(status) {
-      if (!state.selectedJob) { alert('Select a job first'); return; }
-      try {
-        const qs = new URLSearchParams({ job: state.selectedJob.folder_prefix });
-        if (status) qs.append('status', status);
-        const resp = await fetch('/api/export/batch?' + qs.toString(), {
-          headers: state.token ? { 'Authorization': 'Bearer ' + state.token } : {}
-        });
-        if (!resp.ok) throw new Error(await resp.text());
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `export_${state.selectedJob.folder_prefix}_${status || 'all'}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      } catch (e) {
-        alert('Export failed: ' + e.message);
-      }
-    }
+	    async function downloadExport(status) {
+	      if (!state.selectedJob) { alert('Select a job first'); return; }
+	      try {
+	        const res = await api('/api/export/batch/s3', {
+	          method: 'POST',
+	          body: JSON.stringify({ job: state.selectedJob.folder_prefix, status, upload_ftp: false, mark_exported: true })
+	        });
+	        const url = res.url;
+	        if (!url) throw new Error('Missing export URL');
+	        const a = document.createElement('a');
+	        a.href = url;
+	        a.download = `export_${state.selectedJob.folder_prefix}_${status || 'all'}.zip`;
+	        document.body.appendChild(a);
+	        a.click();
+	        a.remove();
+	        await refreshDocs(true);
+	      } catch (e) {
+	        alert('Export failed: ' + e.message);
+	      }
+	    }
     const exportApprovedBtn = document.getElementById('exportApprovedBtn');
     const exportRejectedBtn = document.getElementById('exportRejectedBtn');
     if (exportApprovedBtn) exportApprovedBtn.addEventListener('click', () => downloadExport('Approved'));

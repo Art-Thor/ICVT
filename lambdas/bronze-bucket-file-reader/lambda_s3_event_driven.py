@@ -87,10 +87,121 @@ def build_dated_prefix(folder: str, filename: str):
 
 BRONZE_BUCKET = os.getenv("BRONZE_BUCKET", "bronze-bucket-icvt")
 SILVER_BUCKET = os.getenv("SILVER_BUCKET", "silver-bucket-icvt")
+JOB_CONFIG_BUCKET = os.getenv("JOB_CONFIG_BUCKET") or SILVER_BUCKET
+JOB_CONFIG_PREFIX = os.getenv("JOB_CONFIG_PREFIX", "portal/config/jobs").strip("/")
+JOB_CONFIG_CACHE_TTL_S = int(os.getenv("JOB_CONFIG_CACHE_TTL_S", "60"))
 
 TEXTRACT_POLL_INITIAL_DELAY = float(os.getenv("TEXTRACT_POLL_INITIAL_DELAY", "1.0"))   
 TEXTRACT_POLL_MAX_DELAY = float(os.getenv("TEXTRACT_POLL_MAX_DELAY", "6.0"))           
 TEXTRACT_POLL_MAX_WAIT = float(os.getenv("TEXTRACT_POLL_MAX_WAIT", "240.0"))           
+
+_job_config_cache = {}  # job_prefix -> {"ts": float, "config": dict}
+
+NZ_BANK_ACCOUNT_RE = re.compile(r"\b(\d{2})[- ]?(\d{4})[- ]?(\d{7})[- ]?(\d{2})\b")
+AU_BSB_ACCOUNT_RE = re.compile(r"\b(\d{3})[- ]?(\d{3})\b.*?\b(\d{6,10})\b")
+
+
+def job_config_s3_key(job_prefix: str) -> str:
+    base = JOB_CONFIG_PREFIX.strip("/")
+    job_prefix = (job_prefix or "").strip("/")
+    if not job_prefix:
+        return ""
+    if base:
+        return f"{base}/{job_prefix}.json"
+    return f"{job_prefix}.json"
+
+
+def get_job_config(job_prefix: str) -> dict:
+    job_prefix = (job_prefix or "").strip("/")
+    if not job_prefix:
+        return {}
+    cached = _job_config_cache.get(job_prefix)
+    now = time.time()
+    if cached and (now - cached.get("ts", 0) < JOB_CONFIG_CACHE_TTL_S):
+        return cached.get("config") or {}
+    key = job_config_s3_key(job_prefix)
+    cfg = {}
+    try:
+        obj = S3.get_object(Bucket=JOB_CONFIG_BUCKET, Key=key)
+        cfg = json.loads(obj["Body"].read())
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+            raise
+    _job_config_cache[job_prefix] = {"ts": now, "config": cfg}
+    return cfg
+
+
+def _extract_bank_account_candidate(forms_data: list[dict]):
+    best = None  # (score, formatted, form_item)
+
+    for item in forms_data or []:
+        key = (item.get("key") or "").strip().lower()
+        val = (item.get("value") or "").strip()
+        if not val:
+            continue
+        score = 0
+        if any(token in key for token in ("bank", "account", "acct", "bsb", "payment", "remit")):
+            score += 5
+
+        m = NZ_BANK_ACCOUNT_RE.search(val)
+        if m:
+            formatted = f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}"
+            score += 10
+            cand = (score, formatted, item)
+            if not best or cand[0] > best[0] or (cand[0] == best[0] and len(cand[1]) > len(best[1])):
+                best = cand
+            continue
+
+        digits = re.sub(r"\D+", "", val)
+        if digits:
+            m2 = re.search(r"(\d{15})", digits)
+            if m2:
+                d = m2.group(1)
+                formatted = f"{d[0:2]}-{d[2:6]}-{d[6:13]}-{d[13:15]}"
+                score += 8
+                cand = (score, formatted, item)
+                if not best or cand[0] > best[0] or (cand[0] == best[0] and len(cand[1]) > len(best[1])):
+                    best = cand
+                continue
+
+        m3 = AU_BSB_ACCOUNT_RE.search(val)
+        if m3:
+            formatted = f"{m3.group(1)}-{m3.group(2)} {m3.group(3)}"
+            score += 7
+            cand = (score, formatted, item)
+            if not best or cand[0] > best[0] or (cand[0] == best[0] and len(cand[1]) > len(best[1])):
+                best = cand
+
+    if not best:
+        return None
+
+    _, value, item = best
+    textract_conf = (item.get("confidence") or 0) / 100.0
+    return {
+        "value": value,
+        "original_key": item.get("original_key"),
+        "value_box": item.get("value_box") or {},
+        "confidence": textract_conf,
+    }
+
+
+def _compute_doc_confidence(normalized_kv: list[dict], required_fields: list[str], strategy: str) -> float:
+    field_map = {str((i.get("key") or "")).strip().lower(): i for i in (normalized_kv or []) if i.get("key")}
+    confs = []
+    for name in required_fields:
+        item = field_map.get(str(name).strip().lower())
+        try:
+            conf = float(item.get("confidence")) if item else 0.0
+        except Exception:
+            conf = 0.0
+        confs.append(conf)
+    if not confs:
+        return 0.0
+    if strategy == "avg_required":
+        return sum(confs) / max(1, len(confs))
+    return min(confs)
 
 
 def lambda_handler(event, context):
@@ -337,6 +448,14 @@ Return only the final JSON array as valid JSON.
         temperature=0
     )
 
+    usage_obj = getattr(gpt_response, "usage", None)
+    usage = {}
+    if usage_obj:
+        for k in ("input_tokens", "output_tokens", "total_tokens"):
+            v = getattr(usage_obj, k, None)
+            if v is not None:
+                usage[k] = v
+
     output_text = getattr(gpt_response, "output_text", "") or ""
     output_text = output_text.strip()
     if output_text.startswith("```"):
@@ -387,7 +506,7 @@ Return only the final JSON array as valid JSON.
         })
 
     final_kv = deduplicate_by_confidence(final_kv)
-    return final_kv
+    return final_kv, usage
 
 
 def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket: str) -> dict:
@@ -406,7 +525,68 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
         analyze_response = textract_analyze_async(source_bucket, file_key)
         forms_data = parse_kv_from_blocks(analyze_response)
 
-        normalized_kv = normalize_with_gpt(forms_data)
+        normalized_kv, openai_usage = normalize_with_gpt(forms_data)
+
+        # Prefer extracting a real bank account number for "Account Number" when it is present.
+        acct = _extract_bank_account_candidate(forms_data)
+        if acct and acct.get("value"):
+            found = False
+            for item in normalized_kv:
+                if (item.get("key") or "").strip().lower() == "account number":
+                    item["value"] = acct["value"]
+                    try:
+                        item["confidence"] = max(float(item.get("confidence") or 0.0), float(acct.get("confidence") or 0.0))
+                    except Exception:
+                        pass
+                    if acct.get("value_box"):
+                        item["BoundingBox"] = acct["value_box"]
+                    found = True
+                    break
+            if not found:
+                normalized_kv.append(
+                    {
+                        "original_key": acct.get("original_key"),
+                        "key": "Account Number",
+                        "value": acct["value"],
+                        "confidence": float(acct.get("confidence") or 0.0),
+                        "BoundingBox": acct.get("value_box") or {},
+                    }
+                )
+
+        folder_name = os.path.dirname(file_key)
+        job_prefix = folder_name.strip("/")
+        cfg = get_job_config(job_prefix) or {}
+
+        auto_cfg = cfg.get("auto_processing") if isinstance(cfg.get("auto_processing"), dict) else {}
+        approve_threshold = auto_cfg.get("approve_min_confidence") or auto_cfg.get("approve_threshold") or cfg.get("approve_min_confidence") or cfg.get("auto_approve_threshold")
+        hold_threshold = auto_cfg.get("hold_below_confidence") or auto_cfg.get("hold_below")
+        strategy = str(auto_cfg.get("strategy") or "min_required").strip().lower()
+
+        required_fields = cfg.get("required_fields")
+        if not isinstance(required_fields, list):
+            required_fields = ["Invoice Number", "Invoice Date", "Total Amount", "Supplier/Vendor Name"]
+
+        doc_conf = _compute_doc_confidence(normalized_kv, [str(x) for x in required_fields], strategy)
+        status = "To Review"
+        decision = None
+        try:
+            approve_threshold = float(approve_threshold) if approve_threshold is not None else None
+        except Exception:
+            approve_threshold = None
+        try:
+            hold_threshold = float(hold_threshold) if hold_threshold is not None else None
+        except Exception:
+            hold_threshold = None
+
+        if approve_threshold is not None:
+            if doc_conf >= approve_threshold:
+                status = "Approved"
+                decision = "Approved"
+            elif hold_threshold is not None and doc_conf < hold_threshold:
+                status = "Hold"
+                decision = "Hold"
+
+        page_count = sum(1 for b in (analyze_response.get("Blocks") or []) if b.get("BlockType") == "PAGE")
 
         result = {
             "source_bucket": source_bucket,
@@ -414,11 +594,20 @@ def process_document_to_silver(source_bucket: str, file_key: str, silver_bucket:
             "processed_at": datetime.utcnow().isoformat(),
             "processing_id": str(uuid.uuid4()),
             "normalized_data": normalized_kv,
-            "status": "To Review"
+            "status": status,
+            "page_count": page_count,
+            "openai": {"model": OPENAI_MODEL, "usage": openai_usage},
+            "auto_processing": {
+                "strategy": strategy,
+                "required_fields": required_fields,
+                "doc_confidence": doc_conf,
+                "approve_threshold": approve_threshold,
+                "hold_threshold": hold_threshold,
+                "decision": decision,
+            },
         }
 
         clean_filename = os.path.splitext(os.path.basename(file_key))[0]
-        folder_name = os.path.dirname(file_key)
         dated_prefix = build_dated_prefix(folder_name, clean_filename)
         output_key = f"textract-results/{dated_prefix}/{clean_filename}.json"
 
